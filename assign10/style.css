@@ -1,0 +1,53 @@
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  color: #333333;
+  line-height: 1.5;
+  padding: 2em;
+}
+
+header {
+  text-align: center;
+  margin-bottom: 2rem;
+  color: purple;
+}
+
+
+.three-column-layout {
+  display: grid;
+  gap: 20px;
+  
+  grid-template-columns: 1fr; 
+}
+
+@media (min-width: 768px) {
+  .three-column-layout {
+    grid-template-columns: 1fr 2fr 1fr;
+  }
+}
+
+main, aside {
+  padding: 1.5em;
+  border-radius: 8px;
+}
+
+.main-content {
+  background-color: #f9f9f9;
+  border: 2px solid rgb(69, 189, 95);
+}
+
+.sidebar {
+  background-color: #f1f1f1;
+}
+
+h2 {
+  font-size: 1.25rem;
+  margin-bottom: 0.5em;
+  color: #555;
+}
