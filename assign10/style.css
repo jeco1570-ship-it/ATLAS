@@ -1,4 +1,3 @@
-
 * {
   box-sizing: border-box;
   margin: 0;
@@ -16,19 +15,50 @@ header {
   text-align: center;
   margin-bottom: 2rem;
   color: purple;
+  grid-area: heady; 
 }
 
-
-.three-column-layout {
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  background: yellow; 
   display: grid;
+  width: 100vw;
+  height: 100vh; 
   gap: 20px;
   
-  grid-template-columns: 1fr; 
+  grid-template-columns: 1fr 2fr 1fr;
+  grid-template-areas:
+  "heady     heady     heady"
+  "navvy     navvy     navvy"
+  "aside1    mainy     aside2"
+  "aside1    mainy     aside2"
+  "aside1    mainy     aside2"
+  "footy     footy     footy";
 }
 
-@media (min-width: 768px) {
-  .three-column-layout {
-    grid-template-columns: 1fr 2fr 1fr;
+@media screen and (min-width: 641px) and (max-width:900px) {
+  .container {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas: 
+      "heady heady"
+      "navvy navvy"
+      "mainy mainy"
+      "aside1 aside2"
+      "footy footy";
+  }
+}
+
+@media screen and (max-width: 640px) {
+  .container {
+    grid-template-columns: 1fr;
+    grid-template-areas: 
+      "heady"
+      "mainy"
+      "aside1"
+      "aside2"
+      "navvy"
+      "footy";
   }
 }
 
@@ -37,17 +67,8 @@ main, aside {
   border-radius: 8px;
 }
 
-.main-content {
-  background-color: #f9f9f9;
-  border: 2px solid rgb(69, 189, 95);
-}
-
-.sidebar {
-  background-color: #f1f1f1;
-}
-
-h2 {
-  font-size: 1.25rem;
-  margin-bottom: 0.5em;
-  color: #555;
-}
+main { grid-area: mainy; background: powderblue; max-height: 100%; }
+#aside1 { grid-area: aside1; background: mintcream; }
+#aside2 { grid-area: aside2; background: lavender; }
+nav { grid-area: navvy; background: peachpuff; padding: 1em; text-align: center; }
+footer { grid-area: footy; background: lightsalmon; padding: 1em; text-align: center; }
