@@ -25,10 +25,10 @@ label {
 	text-align:right;
 }
 #formcol1 li {
-	list-style:none;
+	list-style:none !important;
 }
 #formcol1 ul {
-    list-style-type: none;
+    list-style-type: none !important;
 }
 select:focus, select:active, input:focus, input:active, input:focus + label,
 input:active + label, label[for]:focus, label[for]:active {
