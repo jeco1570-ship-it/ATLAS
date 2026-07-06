@@ -3,6 +3,10 @@
 
 /* form styling */
 
+body {
+    background-color: black;
+    color: white;
+}
 
 #wrapper {
 	width: 60%;
