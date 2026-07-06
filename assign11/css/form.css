@@ -15,8 +15,10 @@ body {
 
 div#formcol1 {
 	float:left;	
-	width: 100%;
-}
+	display: inline-block;
+    width: 120px;
+    text-align: right; 
+    margin-right: 10px; 
 
 label {
 	margin-right: .3em;
