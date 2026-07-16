@@ -1,0 +1,3909 @@
+
+window.DocAccess = window.DocAccess || {};
+
+if (!window.DocAccess.config) {
+    window.DocAccess.config = window.DocAccessConfig || {};
+}
+
+if (!window.DocAccess.scriptOrigin) {
+    (function () {
+        let scriptSrc = null;
+        if (document.currentScript && document.currentScript.src) {
+            scriptSrc = document.currentScript.src;
+        } else {
+
+            const scripts = document.getElementsByTagName('script');
+            for (let i = 0; i < scripts.length; i++) {
+                if (scripts[i].src && scripts[i].src.match(/docbox\.js(\?.*)?$/)) {
+                    scriptSrc = scripts[i].src;
+                    break;
+                }
+            }
+        }
+        if (scriptSrc) {
+            try {
+                const url = new URL(scriptSrc);
+                window.DocAccess.scriptOrigin = url.origin;
+            } catch (e) {
+                window.DocAccess.scriptOrigin = 'https://docaccess.com';
+            }
+        } else {
+            window.DocAccess.scriptOrigin = 'https://docaccess.com';
+        }
+    })();
+}
+
+if (!window.DocAccess.domainDocumentLinkData) {
+    window.DocAccess.domainDocumentLinkData = {};
+}
+if (!window.DocAccess.primaryDomain) {
+    window.DocAccess.primaryDomain = null;
+}
+if (!window.DocAccess.domainAliases) {
+    window.DocAccess.domainAliases = [];
+}
+if (window.DocAccess.onDocAccessDomain === undefined) {
+    window.DocAccess.onDocAccessDomain = false;
+}
+if (window.DocAccess.domainDataLoaded === undefined) {
+    window.DocAccess.domainDataLoaded = false;
+}
+
+if (!window.DocAccess.sha256Cache) {
+    window.DocAccess.sha256Cache = new Map();
+}
+if (!window.DocAccess.normalizationCache) {
+    window.DocAccess.normalizationCache = new Map();
+}
+
+if (!window.DocAccess.processedLinks) {
+    window.DocAccess.processedLinks = new WeakMap();
+}
+
+if (window.DocAccess.isBatchProcessing === undefined) {
+    window.DocAccess.isBatchProcessing = false;
+}
+
+if (!window.DocAccess.log) {
+    window.DocAccess.log = [];
+    window.DocAccess._log = function (msg, ...args) {
+        window.DocAccess.log.push({ t: Date.now(), msg, args });
+        if (window.DocAccess.log.length > 500) window.DocAccess.log.shift();
+    };
+}
+
+if (!window.DocAccess.currentDomain) {
+    window.DocAccess.currentDomain = window.location.hostname.replace(/^www\./, '').toLowerCase();
+}
+
+if (!window.DocAccess.defaultExcludedPaths) {
+    window.DocAccess.defaultExcludedPaths = [
+        '/admin/*',
+        'reciteme.com/doc/url*'
+    ];
+}
+if (!window.DocAccess.excludedPaths) {
+    window.DocAccess.excludedPaths = [...window.DocAccess.defaultExcludedPaths];
+}
+
+if (window.DocAccess.currentLightboxState === undefined) {
+    window.DocAccess.currentLightboxState = null;
+}
+if (window.DocAccess.isHandlingHashChange === undefined) {
+    window.DocAccess.isHandlingHashChange = false;
+}
+if (window.DocAccess.lastActivatedLink === undefined) {
+    window.DocAccess.lastActivatedLink = null;
+}
+
+window.DocAccess.commonFilePatterns = `
+    a[href*=".pdf" i],
+    a[href*="/api/assets/"],
+    a[href*="DocumentCenter/View/" i],
+    a[href*="/ViewFile/"],
+    a[href*="/showpublisheddocument/"],
+    a[href*="/media/"],
+    a[href^="media/"],
+    a[href*="/ld.php?content_id="],
+    a[href*="/assets/"][href*="/file"],
+    a[href*="/assets/pdf/"],
+    a[href*="/home/showdocument?id="],
+    a[href*="Archive.aspx"][href*="ADID="],
+    a[href*="Archive.aspx"][href*="AMID="],
+    a[href*="/DocumentView.aspx?DID="],
+    a[href^="FileStream.ashx?DocumentId="],
+    a[href*="/common/pages/GetFile.ashx"],
+    a[href*="/file/getfile/"],
+    a[href*="drive.google.com/file/d/"],
+    a[href*="drive.google.com/open?id="],
+    a[href*="drive.google.com/uc?export=download"],
+    a[href*="docs.google.com/document/d/"],
+    a[href*="docs.google.com/spreadsheets/d/"],
+    a[href*="docs.google.com/presentation/d/"],
+    a[href*="sharepoint.com/:b:"],
+    a[href*="box.com/s/"],
+    a[href*="box.com/v/"],
+    a[href*="box.com/file/"],
+    a[href*="laserfiche.com/Portal/DocView.aspx" i],
+    a[href*="laserfiche.com/Portal/ElectronicFile.aspx" i],
+    a[href*="5il.co/"],
+    a[href*="aptg.co/"],
+    a[href*="View.ashx?"],
+    a[href*="ViewReport.ashx?"],
+    a[href*="/files/"],
+    a[href*="/minutes"],
+    a[href*="/agenda"],
+    a[href*="/fs/resource-manager/view/"],
+    a[href*="/portal/"][href*="/open/"],
+    a[href*="/docs/"],
+    a[data-downloadurl],
+    a[href*="GetMeetingFileStream"],
+    a[href*="/document/"],
+    a[href*="/pdf_packet/get_agenda_document_link"],
+    a[href*="MetaViewer.php?view_id="],
+    a[href*="AgendaViewer.php?view_id="],
+    a[href*="legistar.com/gateway.aspx?M=F&ID="],
+    a[href*="/DocumentSearch/Home/downloaddoc"],
+    a[href*="/Public/CompiledDocument"][href*="meetingTemplateId="][href*="compileOutputType=1"],
+    a[href$="/file"],
+    a[href$="/getmedia/"],
+    a.docbox-enable,
+    a.docbox-enable-viewer,
+    a.docbox-direct
+`;
+
+// Does this URL look like a document link, per the SAME selector used to
+// collect links on customer pages? Evaluated by building a detached anchor
+// and asking the browser to match it against commonFilePatterns — no
+// second pattern list to drift. Class/data-attribute catch-alls
+// (docbox-enable, data-downloadurl) intentionally can't match here: a bare
+// URL carries no DOM opt-in, so URL-only callers (e.g. the docviewer's
+// in-PDF annotation links) only submit URLs whose *shape* qualifies.
+window.DocAccess.urlLooksLikeDocument = function (url) {
+    if (!url || typeof url !== 'string') return false;
+    try {
+        const probe = document.createElement('a');
+        probe.setAttribute('href', url);
+        return probe.matches(window.DocAccess.commonFilePatterns);
+    } catch (e) {
+        return false;
+    }
+};
+
+window.DocAccess.shouldNormalizeHostname = function (hostname) {
+    if (!window.DocAccess.primaryDomain) return false;
+
+    const hostLower = hostname.toLowerCase();
+    const hostWithoutWww = hostLower.replace(/^www\./, '');
+    const primaryLower = window.DocAccess.primaryDomain.toLowerCase();
+    const primaryWithoutWww = primaryLower.replace(/^www\./, '');
+
+    if (hostWithoutWww === primaryWithoutWww) {
+        return true;
+    }
+
+    return window.DocAccess.domainAliases.some(alias => {
+        const aliasLower = alias.toLowerCase();
+        const aliasWithoutWww = aliasLower.replace(/^www\./, '');
+        return hostWithoutWww === aliasWithoutWww;
+    });
+}
+
+window.DocAccess.matchesExcludedPath = function (url, pattern) {
+    if (typeof pattern !== 'string') return false;
+    pattern = pattern.trim();
+    if (!pattern) return false;
+
+    var stripped = pattern.replace(/^(?:https?:)?\/\//i, '');
+    if (!stripped) return false;
+
+    var patternValue, pathOnly;
+    if (stripped.charAt(0) === '/') {
+        patternValue = stripped;
+        pathOnly = true;
+    } else {
+        var slashIdx = stripped.indexOf('/');
+        var hostnamePortion = (slashIdx === -1 ? stripped : stripped.slice(0, slashIdx))
+            .toLowerCase()
+            .replace(/^www\./, '');
+        var rest = slashIdx === -1 ? '' : stripped.slice(slashIdx);
+        patternValue = hostnamePortion + rest;
+        pathOnly = false;
+    }
+
+    var target;
+    try {
+        var urlObj = new URL(url);
+
+        var afterScheme = url.replace(/^(?:[a-z][a-z0-9+.-]*:)?\/\//i, '');
+        var firstSep = afterScheme.match(/[\/?#]/);
+        var path = firstSep && firstSep[0] === '/' ? urlObj.pathname : '';
+        var pathAndQuery = path + (urlObj.search || '');
+        if (pathOnly) {
+            target = pathAndQuery;
+        } else {
+            if (!urlObj.hostname) return false;
+            target = urlObj.hostname.toLowerCase().replace(/^www\./, '') + pathAndQuery;
+        }
+    } catch (e) {
+        return false;
+    }
+
+    var regexBody = patternValue
+        .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*/g, '.*');
+    try {
+        return new RegExp('^' + regexBody + '$', 'i').test(target);
+    } catch (e) {
+        return false;
+    }
+};
+
+window.DocAccess.isUrlExcluded = function (url) {
+    var patterns = window.DocAccess.excludedPaths;
+    if (!patterns || patterns.length === 0) return false;
+    for (var i = 0; i < patterns.length; i++) {
+        if (window.DocAccess.matchesExcludedPath(url, patterns[i])) {
+            return true;
+        }
+    }
+    return false;
+};
+
+window.DocAccess.isUrlIncluded = function (url) {
+    if (!window.DocAccess.includedPaths || window.DocAccess.includedPaths.length === 0) {
+        return false;
+    }
+
+    try {
+        const urlObj = new URL(url);
+        const urlPath = urlObj.pathname;
+        const fullPath = urlObj.pathname + urlObj.search;
+
+        return window.DocAccess.includedPaths.some(pattern => {
+            try {
+                const regex = new RegExp(pattern);
+
+                return regex.test(urlPath) || regex.test(fullPath);
+            } catch (e) {
+                console.warn('DocAccess: Invalid included path regex pattern:', pattern, e);
+                return false;
+            }
+        });
+    } catch (e) {
+        return false;
+    }
+};
+
+window.DocAccess.matchesPagePattern = function (pattern) {
+    try {
+        var isFullUrl = pattern.indexOf('http://') === 0 || pattern.indexOf('https://') === 0;
+        var stripWww = function (u) { return u.replace(/^(https?:\/\/)www\./i, '$1'); };
+        var source = isFullUrl ? stripWww(pattern) : pattern;
+        var regexBody = source
+            .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+            .replace(/\*/g, '.*');
+        var regex = new RegExp('^' + regexBody + '$', 'i');
+        if (isFullUrl) {
+            var fullUrl = stripWww(window.location.origin + window.location.pathname + window.location.search);
+            return regex.test(fullUrl);
+        }
+        var pathValue = window.location.pathname + window.location.search;
+        return regex.test(pathValue);
+    } catch (e) {
+        return false;
+    }
+};
+
+window.DocAccess.isPageExcluded = function () {
+    var excludes = window.DocAccess.foundOnExcludes || [];
+    if (excludes.length > 0 && excludes.some(function (p) { return window.DocAccess.matchesPagePattern(p); })) {
+        return true;
+    }
+    var restrict = window.DocAccess.restrictToFoundOn || [];
+    if (restrict.length > 0 && !restrict.some(function (p) { return window.DocAccess.matchesPagePattern(p); })) {
+        return true;
+    }
+    return false;
+};
+
+window.DocAccess.cleanChromeExtensionUrl = function (urlString) {
+    if (!urlString) return urlString;
+
+    const chromeExtensionPattern = /^(?:https?:)?\/?\/?chrome-extension\/?\/?\/?efaidnbmnnnibpcajpcglclefindmkaj\/(https?:\/\/.+)$/i;
+    const match = urlString.match(chromeExtensionPattern);
+    if (match) {
+        return match[1];
+    }
+    return urlString;
+};
+
+window.DocAccess.cleanProtocolRelativeUrl = function (urlString) {
+    if (!urlString) return urlString;
+    if (urlString.startsWith('//') && !urlString.startsWith('///')) {
+        return 'https:' + urlString;
+    }
+    return urlString;
+};
+
+window.DocAccess.canonicalizeQueryEncoding = function (urlString) {
+    try {
+        const qIdx = urlString.indexOf('?');
+        if (qIdx === -1) return urlString;
+        const fragIdx = urlString.indexOf('#', qIdx);
+        const query = urlString.slice(qIdx + 1, fragIdx === -1 ? undefined : fragIdx);
+        if (query === '') return urlString;
+
+        function formUrlencode(s) {
+            return encodeURIComponent(s)
+                .replace(/[!'()*~]/g, function (c) {
+                    return '%' + c.charCodeAt(0).toString(16).toUpperCase();
+                })
+                .replace(/%20/g, '+');
+        }
+        function safeDecode(s) {
+            try { return decodeURIComponent(s.replace(/\+/g, ' ')); } catch (e) { return s; }
+        }
+
+        const rebuilt = query.split('&').map(function (pair) {
+            if (pair === '') return pair;
+            const eq = pair.indexOf('=');
+            if (eq === -1) return formUrlencode(safeDecode(pair));
+            return formUrlencode(safeDecode(pair.slice(0, eq))) + '=' + formUrlencode(safeDecode(pair.slice(eq + 1)));
+        }).join('&');
+
+        return urlString.slice(0, qIdx) + '?' + rebuilt + (fragIdx === -1 ? '' : urlString.slice(fragIdx));
+    } catch (e) {
+        return urlString;
+    }
+};
+
+window.DocAccess.canonicalizeEmbeddedUrlQuery = function (urlString) {
+    try {
+        const qIdx = urlString.indexOf('?');
+        if (qIdx === -1) return urlString;
+        const fragIdx = urlString.indexOf('#', qIdx);
+        const query = urlString.slice(qIdx + 1, fragIdx === -1 ? undefined : fragIdx);
+        if (query.indexOf('://') === -1) return urlString;
+        return window.DocAccess.canonicalizeQueryEncoding(urlString);
+    } catch (e) {
+        return urlString;
+    }
+};
+
+window.DocAccess.cleanTrackingParams = function (urlString) {
+    try {
+
+        urlString = window.DocAccess.cleanProtocolRelativeUrl(urlString);
+
+        urlString = window.DocAccess.cleanChromeExtensionUrl(urlString);
+
+        urlString = urlString.replace(/[?&]customFileName=[^&#]*/g, '');
+
+        if (urlString.includes('civicclerk.blob.core.windows.net/')) {
+            urlString = urlString.replace(/\?.*$/, '');
+        }
+
+        const url = new URL(urlString);
+        const trackingParams = [
+
+            '__hstc', '__hssc', '__hsfp', '_hsenc', '_hsmi', 'hsCtaTracking',
+
+            'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'utm_id',
+
+            '_gl', '_ga', '_gac', '_gid',
+
+            '_wpnonce',
+
+            't', 'v', 'ver', 'timestamp', 'cache', 'cb'
+        ];
+
+        let changed = false;
+        trackingParams.forEach(param => {
+            if (url.searchParams.has(param)) {
+                url.searchParams.delete(param);
+                changed = true;
+            }
+        });
+        return changed ? url.href : urlString;
+    } catch (e) {
+
+        return urlString;
+    }
+}
+
+window.DocAccess.extractPageFragment = function (urlString) {
+    const str = String(urlString || '');
+    const hashIndex = str.indexOf('#');
+    if (hashIndex === -1) return null;
+    const fragment = str.slice(hashIndex + 1);
+    const m = /(?:^|&)page=(\d+)/.exec(fragment);
+    if (!m) return null;
+    const n = parseInt(m[1], 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+window.DocAccess.MANIFEST_HASH_LENGTH = 20;
+
+window.DocAccess.lookupManifestKey = function (hash) {
+    if (typeof hash !== 'string' || hash.length === 0) return null;
+    const data = window.DocAccess.domainDocumentLinkData;
+    if (!data) return null;
+    const truncated = hash.length > window.DocAccess.MANIFEST_HASH_LENGTH
+        ? hash.substring(0, window.DocAccess.MANIFEST_HASH_LENGTH)
+        : hash;
+    if (Object.prototype.hasOwnProperty.call(data, truncated)) return truncated;
+    if (truncated !== hash && Object.prototype.hasOwnProperty.call(data, hash)) return hash;
+    return null;
+};
+
+window.DocAccess.resolveSymlinkHash = function (hash, visited = new Set()) {
+    const key = window.DocAccess.lookupManifestKey(hash);
+    if (key === null) {
+        return hash;
+    }
+
+    const value = window.DocAccess.domainDocumentLinkData[key];
+
+    if (typeof value === 'boolean') {
+        return hash;
+    }
+
+    if (typeof value === 'string') {
+
+        if (value === 'deferred' || value === 'unprocessable' || value === 'archived' || value === 'processing') {
+            return hash;
+        }
+
+        if (visited.has(value)) {
+            console.warn('DocBox: Circular symlink detected', hash, '->', value);
+            return hash;
+        }
+        visited.add(value);
+        return window.DocAccess.resolveSymlinkHash(value, visited);
+    }
+
+    return hash;
+};
+
+window.DocAccess.resolveSymlinkValue = function (hash, visited = new Set()) {
+    const key = window.DocAccess.lookupManifestKey(hash);
+    if (key === null) {
+        return null;
+    }
+
+    const value = window.DocAccess.domainDocumentLinkData[key];
+
+    if (typeof value === 'boolean') {
+        return value;
+    }
+
+    if (value === 'unprocessable' || value === 'archived') {
+        return 'unprocessable';
+    }
+
+    if (value === 'processing') {
+        return 'processing';
+    }
+
+    if (value === 'deferred') {
+        return 'deferred';
+    }
+
+    if (typeof value === 'string') {
+
+        if (value.startsWith('_')) {
+            return false;
+        }
+
+        if (visited.has(value)) {
+            console.warn('DocBox: Circular symlink detected', hash, '->', value);
+            return false;
+        }
+        visited.add(value);
+        return window.DocAccess.resolveSymlinkValue(value, visited);
+    }
+
+    return false;
+};
+
+window.DocAccess.getUrlStatus = function (hash, hasForceEnableClass = false) {
+
+    if (hasForceEnableClass) {
+        return 'enabled';
+    }
+
+    if (window.DocAccess.lookupManifestKey(hash) !== null) {
+        const resolvedValue = window.DocAccess.resolveSymlinkValue(hash);
+
+        if (resolvedValue === true) {
+            return 'enabled';
+        } else if (resolvedValue === 'deferred') {
+            return 'enabled';
+        } else if (resolvedValue === 'unprocessable') {
+            return 'unprocessable';
+        } else if (resolvedValue === 'processing') {
+            return 'processing';
+        } else {
+            return 'disabled';
+        }
+    }
+
+    return 'new';
+};
+
+window.DocAccess.normalizationPatterns = [
+    {
+        name: 'onbase_awp_jpa_downloadfile',
+        pattern: /^(\/OnBaseAgendaOnlineAWP_JPA\/Documents\/)DownloadFile(?:Bytes)?\/.*$/,
+        replacement: '$1DownloadFileBytes/.pdf',
+        tags: ['onbase'],
+        preserveParams: ['documentType', 'meetingId', 'isAttachment'],
+        pathRewrite: true
+    },
+    {
+        name: 'civicplus_documentcenter',
+        pattern: /^\/documentcenter\/view\/(\d+)(?:\/.*)?$/i,
+        replacement: '/DocumentCenter/View/$1',
+        tags: ['cp-c'],
+        pathRewrite: true
+    },
+    {
+        name: 'civicplus_archive_aspx',
+        pattern: /^\/Archive\.aspx\?ADID=(\d+)$/i,
+        replacement: '/ArchiveCenter/ViewFile/Item/$1',
+        tags: ['cp-c']
+    },
+    {
+        name: 'civicplus_agendacenter_html',
+        pattern: /^\/AgendaCenter\/ViewFile\/Agenda\/(_[A-Za-z0-9-]+)$/i,
+        replacement: '/AgendaCenter/ViewFile/Agenda/$1',
+        tags: ['cp-c'],
+        condition: (urlPath, searchParams) => searchParams && !!searchParams.get('html'),
+        clearParams: true
+    },
+    {
+        name: 'granicus_showdoc_path',
+        pattern: /^\/home\/show(document|publisheddocument)\/(\d+)(?:\/\d+)?$/i,
+        replacement: '/home/showdocument/$2',
+        tags: ['gc'],
+        clearParams: (urlPath, searchParams) => searchParams && searchParams.has('locale'),
+        pathRewrite: true
+    },
+    {
+        name: 'granicus_showdoc_query',
+        pattern: /^\/home\/show(document|publisheddocument)\?id=(\d+)(?:&[^#]*)*$/i,
+        replacement: '/home/showdocument/$2',
+        tags: ['gc']
+    },
+    {
+        name: 'granicus_versioned_assets',
+        pattern: /^(\/files\/(?:assets|content)\/public)\/v\/\d+(\/.*)/,
+        replacement: '$1$2',
+        tags: ['gc'],
+        pathRewrite: true
+    },
+    {
+        name: 'liferay_versioned_documents',
+        pattern: /^(\/documents\/\d+\/\d+\/.+\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i,
+        replacement: '$1',
+        tags: ['liferay'],
+        clearParams: true
+    },
+    {
+        name: 'wpdm',
+        pattern: /^\/.*$/i,
+        replacement: '/',
+        tags: ['wpdm'],
+        condition: function (urlPath, searchParams) {
+            return searchParams && !!searchParams.get('wpdmdl');
+        },
+        preserveParams: ['wpdmdl']
+    },
+    {
+        name: 'diligent_numeric',
+        pattern: /^\/document\/(\d+)(\/.*)?$/,
+        replacement: '/document/$1/',
+        preserveParams: ['printPdf'],
+        tags: ['diligent'],
+        pathRewrite: true
+    },
+    {
+        name: 'egov_item',
+        pattern: /^(\/egov\/apps\/document\/center\.egov)$/i,
+        replacement: '$1',
+        tags: ['egov'],
+        condition: function (urlPath, searchParams) {
+            return searchParams && searchParams.get('view') === 'item' && !!searchParams.get('id');
+        },
+        preserveParams: ['view', 'id']
+    }
+];
+
+window.DocAccess.applyNormalizationPatterns = function (urlPath, searchParams) {
+    for (const rule of window.DocAccess.normalizationPatterns) {
+
+        if (rule.pathRewrite && window.DocAccess.skipPathRewriteNormalization) {
+            continue;
+        }
+
+        if (rule.condition && !rule.condition(urlPath, searchParams)) {
+            continue;
+        }
+
+        if (rule.pattern.source.includes('\\?')) {
+
+            const fullPath = searchParams.toString() ? `${urlPath}?${searchParams.toString()}` : urlPath;
+            const match = fullPath.match(rule.pattern);
+            if (match) {
+
+                return {
+                    path: fullPath.replace(rule.pattern, rule.replacement),
+                    clearParams: true,
+                    preserveParams: rule.preserveParams
+                };
+            }
+        } else {
+
+            const match = urlPath.match(rule.pattern);
+            if (match) {
+                const clearParams = typeof rule.clearParams === 'function'
+                    ? rule.clearParams(urlPath, searchParams)
+                    : !!rule.clearParams;
+                return {
+                    path: urlPath.replace(rule.pattern, rule.replacement),
+                    clearParams: clearParams,
+                    preserveParams: rule.preserveParams
+                };
+            }
+        }
+    }
+    return null;
+};
+
+window.DocAccess.applyPatternResultToUrl = function (url, patternResult) {
+    if (!patternResult) return;
+
+    url.pathname = patternResult.path;
+
+    if (patternResult.clearParams) {
+        url.search = '';
+    } else if (patternResult.preserveParams) {
+
+        const newParams = new URLSearchParams();
+        for (const param of patternResult.preserveParams) {
+            if (url.searchParams.has(param)) {
+                newParams.set(param, url.searchParams.get(param));
+            }
+        }
+        url.search = newParams.toString();
+    }
+};
+
+window.DocAccess.normalizeBoxShareUrl = function (urlString) {
+    try {
+        const url = new URL(urlString);
+        if (url.hostname !== 'box.com' && !url.hostname.endsWith('.box.com')) {
+            return null;
+        }
+        const fileMatch = url.pathname.match(/^\/file\/(\d+)\/?$/);
+        if (!fileMatch) {
+            return null;
+        }
+        const token = url.searchParams.getAll('s').pop();
+        if (!token) {
+            return null;
+        }
+        return `${url.protocol}//${url.hostname}/s/${token}/file/${fileMatch[1]}`;
+    } catch (e) {
+        return null;
+    }
+};
+
+window.DocAccess.normalizeUrlWithManifestCheck = async function (urlString) {
+
+    if (window.DocAccess.normalizationCache.has(urlString)) {
+        return window.DocAccess.normalizationCache.get(urlString);
+    }
+
+    urlString = window.DocAccess.cleanProtocolRelativeUrl(urlString);
+    urlString = window.DocAccess.canonicalizeEmbeddedUrlQuery(urlString);
+
+    try {
+        const url = new URL(urlString);
+        if (url.hostname === 'drive.google.com' || url.hostname === 'docs.google.com') {
+
+            if (url.pathname.includes('/pub')) {
+                window.DocAccess.normalizationCache.set(urlString, urlString);
+                return urlString;
+            }
+
+            let fileId = null;
+
+            const fileMatch = url.pathname.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+            if (fileMatch) {
+                fileId = fileMatch[1];
+            }
+
+            if (!fileId && url.searchParams.has('id')) {
+                fileId = url.searchParams.get('id');
+            }
+
+            if (!fileId) {
+                const docsMatch = url.pathname.match(/\/(?:document)\/d\/([a-zA-Z0-9_-]+)/);
+                if (docsMatch) {
+                    fileId = docsMatch[1];
+                }
+            }
+
+            if (fileId) {
+
+                const normalizedUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+                window.DocAccess.normalizationCache.set(urlString, normalizedUrl);
+                return normalizedUrl;
+            }
+        }
+
+        if (url.hostname.endsWith('.sharepoint.com') && url.pathname.includes('/:b:/')) {
+            const spUrl = new URL(url.href);
+            spUrl.search = '';
+            spUrl.searchParams.set('download', '1');
+            spUrl.hash = '';
+            window.DocAccess.normalizationCache.set(urlString, spUrl.href);
+            return spUrl.href;
+        }
+
+        const boxNormalized = window.DocAccess.normalizeBoxShareUrl(urlString);
+        if (boxNormalized) {
+            window.DocAccess.normalizationCache.set(urlString, boxNormalized);
+            return boxNormalized;
+        }
+
+        if (/(^|\.)laserfiche\.com$/i.test(url.hostname)) {
+            const lfPath = url.pathname.match(/^(.*)\/(?:DocView|ElectronicFile)\.aspx$/i);
+            const lfDocid = url.searchParams.get('docid') || url.searchParams.get('id');
+            const lfRepo = url.searchParams.get('repo');
+            if (lfPath && lfDocid && lfRepo) {
+                const lfDbid = url.searchParams.get('dbid') || '0';
+                const lfNormalized = `${url.origin}${lfPath[1]}/ElectronicFile.aspx?docid=${encodeURIComponent(lfDocid)}&dbid=${encodeURIComponent(lfDbid)}&repo=${encodeURIComponent(lfRepo)}`;
+                window.DocAccess.normalizationCache.set(urlString, lfNormalized);
+                return lfNormalized;
+            }
+        }
+    } catch (e) {
+
+    }
+
+    if (!window.DocAccess.primaryDomain) {
+
+        window.DocAccess.normalizationCache.set(urlString, urlString);
+        return urlString;
+    }
+
+    try {
+        const url = new URL(urlString);
+
+        if (url.hostname.includes('diligentoneplatform')) {
+            url.pathname = url.pathname.replace(/^\/home\/public(\/document\/)/, '$1');
+            const uuidMatch = url.pathname.match(/^\/document\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+            if (uuidMatch) {
+                url.pathname = '/document/' + uuidMatch[1];
+                url.search = '';
+            }
+        }
+
+        const patternResult = window.DocAccess.applyNormalizationPatterns(url.pathname, url.searchParams);
+        window.DocAccess.applyPatternResultToUrl(url, patternResult);
+
+        url.hash = '';
+
+        let normalizedUrl;
+        if (window.DocAccess.shouldNormalizeHostname(url.hostname)) {
+
+            normalizedUrl = new URL(url.href);
+
+            const currentHostWithoutWww = window.location.hostname.toLowerCase().replace(/^www\./, '');
+            const primaryWithoutWww = window.DocAccess.primaryDomain.toLowerCase().replace(/^www\./, '');
+            const isCurrentWindowWwwPrimary = window.location.hostname.toLowerCase().startsWith('www.') &&
+                currentHostWithoutWww === primaryWithoutWww;
+
+            if (isCurrentWindowWwwPrimary) {
+                normalizedUrl.hostname = 'www.' + primaryWithoutWww;
+            } else {
+                normalizedUrl.hostname = window.DocAccess.primaryDomain.toLowerCase();
+            }
+        } else {
+
+            normalizedUrl = new URL(url.href);
+        }
+
+        function isHashEnabled(hash) {
+            const key = window.DocAccess.lookupManifestKey(hash);
+            if (key === null) {
+                return false;
+            }
+
+            const value = window.DocAccess.domainDocumentLinkData[key];
+
+            if (value === true || value === 'deferred') {
+                return true;
+            }
+
+            if (value === 'unprocessable' || value === 'archived') {
+                return false;
+            }
+
+            if (typeof value === 'string') {
+                const resolved = window.DocAccess.resolveSymlinkValue(hash);
+                return resolved === true || resolved === 'deferred';
+            }
+
+            return false;
+        }
+
+        if (normalizedUrl.hostname.startsWith('www.')) {
+            const canonicalUrl = new URL(normalizedUrl.href);
+            canonicalUrl.hostname = canonicalUrl.hostname.replace(/^www\./, '');
+            const canonicalHash = await window.DocAccess.generateSHA256(canonicalUrl.href);
+
+            if (isHashEnabled(canonicalHash)) {
+                window.DocAccess.normalizationCache.set(urlString, canonicalUrl.href);
+                return canonicalUrl.href;
+            }
+        }
+
+        const normalizedHash = await window.DocAccess.generateSHA256(normalizedUrl.href);
+
+        if (isHashEnabled(normalizedHash)) {
+            window.DocAccess.normalizationCache.set(urlString, normalizedUrl.href);
+            return normalizedUrl.href;
+        }
+
+        const variants = [];
+        const domains = [window.DocAccess.primaryDomain, ...window.DocAccess.domainAliases];
+
+        for (const domain of domains) {
+
+            const variantUrl1 = new URL(urlString);
+            variantUrl1.hostname = domain.toLowerCase().replace(/^www\./, '');
+            variantUrl1.hash = '';
+
+            const patternResult1 = window.DocAccess.applyNormalizationPatterns(variantUrl1.pathname, variantUrl1.searchParams);
+            window.DocAccess.applyPatternResultToUrl(variantUrl1, patternResult1);
+
+            variants.push(variantUrl1.href);
+
+            const variantUrl2 = new URL(urlString);
+            variantUrl2.hostname = 'www.' + domain.toLowerCase().replace(/^www\./, '');
+            variantUrl2.hash = '';
+
+            const patternResult2 = window.DocAccess.applyNormalizationPatterns(variantUrl2.pathname, variantUrl2.searchParams);
+            window.DocAccess.applyPatternResultToUrl(variantUrl2, patternResult2);
+
+            variants.push(variantUrl2.href);
+        }
+
+        if (url.protocol === 'http:') {
+            const httpsUrl = new URL(url.href);
+            httpsUrl.protocol = 'https:';
+
+            for (const domain of domains) {
+
+                const httpsVariant1 = new URL(httpsUrl);
+                httpsVariant1.hostname = domain.toLowerCase().replace(/^www\./, '');
+                httpsVariant1.hash = '';
+
+                const patternResult1 = window.DocAccess.applyNormalizationPatterns(httpsVariant1.pathname, httpsVariant1.searchParams);
+                window.DocAccess.applyPatternResultToUrl(httpsVariant1, patternResult1);
+
+                variants.push(httpsVariant1.href);
+
+                const httpsVariant2 = new URL(httpsUrl);
+                httpsVariant2.hostname = 'www.' + domain.toLowerCase().replace(/^www\./, '');
+                httpsVariant2.hash = '';
+
+                const patternResult2 = window.DocAccess.applyNormalizationPatterns(httpsVariant2.pathname, httpsVariant2.searchParams);
+                window.DocAccess.applyPatternResultToUrl(httpsVariant2, patternResult2);
+
+                variants.push(httpsVariant2.href);
+            }
+        }
+
+        const SEMANTIC_PARAMS = ['packet'];
+
+        const host = url.hostname;
+        if (host.includes('diligentoneplatform') || host.includes('diligent.community') || host.includes('highbond')) {
+            SEMANTIC_PARAMS.push('printPdf');
+        }
+
+        function getSemanticSearch(searchParams) {
+            const kept = [];
+            for (const p of SEMANTIC_PARAMS) {
+                if (searchParams.has(p)) kept.push(`${p}=${encodeURIComponent(searchParams.get(p))}`);
+            }
+            return kept.length ? '?' + kept.join('&') : '';
+        }
+
+        const hasNonSemanticParams = [...url.searchParams.keys()].some(k => !SEMANTIC_PARAMS.includes(k));
+
+        const queryStrippedVariants = [];
+        const hasQueryParams = url.search && url.search.length > 1;
+        if (hasQueryParams && hasNonSemanticParams) {
+            for (const variant of variants) {
+                try {
+                    const variantUrl = new URL(variant);
+                    if (variantUrl.search) {
+                        const variantSemantic = getSemanticSearch(variantUrl.searchParams);
+
+                        const noParamUrl = new URL(variant);
+                        noParamUrl.search = variantSemantic;
+                        queryStrippedVariants.push(noParamUrl.href);
+
+                        const searchParams = variantUrl.searchParams;
+                        const firstParamKey = searchParams.keys().next().value;
+                        if (firstParamKey) {
+                            const firstParamUrl = new URL(variant);
+                            const firstParamValue = searchParams.get(firstParamKey);
+
+                            if (SEMANTIC_PARAMS.includes(firstParamKey)) {
+                                firstParamUrl.search = variantSemantic;
+                            } else {
+                                firstParamUrl.search = `?${firstParamKey}=${encodeURIComponent(firstParamValue)}`;
+
+                                for (const p of SEMANTIC_PARAMS) {
+                                    if (variantUrl.searchParams.has(p)) {
+                                        firstParamUrl.searchParams.set(p, variantUrl.searchParams.get(p));
+                                    }
+                                }
+                            }
+                            queryStrippedVariants.push(firstParamUrl.href);
+                        }
+                    }
+                } catch (e) {
+
+                }
+            }
+        }
+
+        variants.push(window.DocAccess.canonicalizeQueryEncoding(normalizedUrl.href));
+
+        const uniqueVariants = [...new Set(variants.flatMap(function (v) {
+            const c = window.DocAccess.canonicalizeQueryEncoding(v);
+            return c === v ? [v] : [v, c];
+        }))];
+        const uniqueQueryStripped = [...new Set(queryStrippedVariants)];
+
+        let disabledUrl = null;
+
+        for (const variant of uniqueVariants) {
+            const variantHash = await window.DocAccess.generateSHA256(variant);
+
+            if (window.DocAccess.lookupManifestKey(variantHash) !== null) {
+                if (isHashEnabled(variantHash)) {
+
+                    window.DocAccess.normalizationCache.set(urlString, variant);
+                    return variant;
+                } else {
+
+                    disabledUrl = variant;
+                }
+            }
+        }
+
+        for (const variant of uniqueQueryStripped) {
+            const variantHash = await window.DocAccess.generateSHA256(variant);
+
+            if (window.DocAccess.lookupManifestKey(variantHash) !== null &&
+                isHashEnabled(variantHash)) {
+                window.DocAccess.normalizationCache.set(urlString, variant);
+                return variant;
+            }
+        }
+
+        if (disabledUrl) {
+            window.DocAccess.normalizationCache.set(urlString, disabledUrl);
+            return disabledUrl;
+        }
+
+        window.DocAccess.normalizationCache.set(urlString, normalizedUrl.href);
+        return normalizedUrl.href;
+
+    } catch (e) {
+
+        window.DocAccess.normalizationCache.set(urlString, urlString);
+        return urlString;
+    }
+}
+
+if (!window.DocAccess._sentLinks) {
+    window.DocAccess._sentLinks = new Set();
+}
+
+window.DocAccess.sendDomainLink = async function (domain, hrefRaw) {
+    if (window.DocAccess.config && window.DocAccess.config.disableExternalAPIs === true) {
+        return;
+    }
+
+    if (!window.DocAccess.domainDataLoaded) {
+        return;
+    }
+
+    const cleanedHref = window.DocAccess.cleanTrackingParams(hrefRaw);
+    const normalizedHref = await window.DocAccess.normalizeUrlWithManifestCheck(cleanedHref);
+
+    const domainName = domain.replace(/^www\./, '').replace(/[^a-zA-Z0-9.-]/g, '').toLowerCase();
+    if (!domainName || !normalizedHref) return;
+
+    let url;
+    try {
+        url = new URL(normalizedHref);
+    } catch (e) {
+        console.error('DocBox: Error parsing URL for domain_links', normalizedHref, e);
+        return;
+    }
+
+    if (url.pathname.startsWith('/docviewer')) return;
+    if (url.hostname.startsWith('streamline-form-submissions')) return;
+    if (domain.endsWith('docaccess.com')) return;
+    // docaccess.com URLs are normally skipped, EXCEPT the SharePoint folder-file
+    // resolver (/api/sharepoint?fetch=file): that is a legitimate, stable
+    // document source (it 302s to the file's tokenized SharePoint download), so
+    // folder-child PDFs can be ingested and become accessible transcripts.
+    const isSharePointFileProxy = url.pathname === '/api/sharepoint' && url.searchParams.get('fetch') === 'file';
+    if (url.hostname.endsWith('docaccess.com') && !url.pathname.startsWith('/uploads/') && !isSharePointFileProxy) return;
+    if (url.href.includes('DO-NOT-COPY-THIS-URL')) return;
+
+    if (url.searchParams.has('html') && url.searchParams.get('html') === 'true') return;
+
+    const path = url.pathname;
+    if (/\.php\/[^\/]+\/[^\/]+\/[^\/]+\/[^\/]+\/[^\/]+\/[^\/]+\//.test(path)) return;
+    if (/\/20\d{2}\/.*\/20\d{2}\/.*\/20\d{2}\//.test(path)) return;
+    if (/\/files\/.*\/files\/.*\/files\//.test(path)) return;
+
+    if (url.pathname.match(/\/media\/[^/]+\/(delete|edit)/i)) return;
+    if (url.pathname.match(/\/node\/[^/]+\/(delete|edit)/i)) return;
+
+    if (window.DocAccess.isUrlExcluded && window.DocAccess.isUrlExcluded(normalizedHref)) {
+        return;
+    }
+
+    if (url.hash && (
+        url.hash.startsWith('#/') ||
+        url.hash.startsWith('#!/') ||
+        url.hash.includes('/assets/') ||
+        url.hash.includes('/admin/') ||
+        url.hash.includes('/app/') ||
+        url.hash.includes('/files/') ||
+        url.hash.includes('/documents/')
+    )) return;
+
+    if (window.DocAccess._sentLinks.has(normalizedHref)) {
+        return;
+    }
+
+    try {
+        const escapedHref = CSS.escape ? CSS.escape(normalizedHref) : normalizedHref.replace(/[!"#$%&'()*+,.\/:;<=>?@[\\\]^`{|}~]/g, '\\$&');
+        const linkElement = document.querySelector(`a[href="${escapedHref}"]`);
+        if (linkElement) {
+            const tractionDock = linkElement.closest('body[ng-app="traction"] .dock');
+            if (tractionDock) {
+                return;
+            }
+        }
+    } catch (e) {
+
+    }
+
+    window.DocAccess._sentLinks.add(normalizedHref);
+
+    let foundOnUrl;
+    const isInDocviewer = /^\/docviewer(?:fallback)?\.html$/.test(window.location.pathname);
+    if (isInDocviewer) {
+        if (window.DocAccessViewer && window.DocAccessViewer.documentMetadataReady) {
+            try {
+                await window.DocAccessViewer.documentMetadataReady;
+            } catch (e) {
+
+                return;
+            }
+        }
+        const trustedUrl = window.DocAccessViewer && window.DocAccessViewer.canonicalUrl;
+        if (!trustedUrl) {
+
+            return;
+        }
+        foundOnUrl = await window.DocAccess.normalizeUrlWithManifestCheck(trustedUrl);
+        if (!foundOnUrl) return;
+    } else {
+        foundOnUrl = window.location.href;
+    }
+    foundOnUrl = foundOnUrl.split('#')[0];
+    foundOnUrl = window.DocAccess.cleanTrackingParams(foundOnUrl);
+
+    let apiHost;
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+        apiHost = 'http://localhost:9000';
+    } else {
+        const scripts = document.getElementsByTagName('script');
+        let scriptDomain = '';
+        for (let i = 0; i < scripts.length; i++) {
+            if (scripts[i].src && scripts[i].src.match(/docbox\.js(\?.*)?$/)) {
+                try {
+                    const url = new URL(scripts[i].src);
+                    scriptDomain = url.hostname;
+                    break;
+                } catch (e) {
+
+                }
+            }
+        }
+        apiHost = scriptDomain && scriptDomain.endsWith('docaccess.com')
+            ? `https://${scriptDomain}`
+            : 'https://docaccess.com';
+    }
+    const apiUrl = `${apiHost}/api/v2/documents/intake/url`;
+    const requestBody = {
+        doc_url: normalizedHref,
+        found_on: foundOnUrl
+    };
+
+    fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+    }).catch(error => {
+        console.error('DocBox: Error sending document link', normalizedHref, foundOnUrl, error);
+    });
+};
+
+window.DocAccess.initializeDocBox = function () {
+
+    window.DocAccess.initializeDocBoxCalled = true;
+
+    let lastEscapeTime = 0;
+    let inertGuardObserver = null;
+    const DOUBLE_ESCAPE_THRESHOLD = 3000;
+
+    window.addEventListener('popstate', function (event) {
+
+        if (window.DocAccess.isHandlingHashChange) {
+            return;
+        }
+
+        window.DocAccess.isHandlingHashChange = true;
+
+        try {
+            const currentHash = window.location.hash;
+
+            if (currentHash.startsWith('#docaccess-')) {
+
+                if (event.state && event.state.docaccess) {
+
+                    openLightbox(event.state.pdfUrl, event.state.direct, event.state.domain, null, event.state.title, null, event.state.pageFragment);
+                } else {
+
+                    const docHash = currentHash.substring('#docaccess-'.length);
+                    openDocumentFromHash(docHash);
+                }
+            } else {
+
+                const lightbox = document.getElementById('docbox-overlay');
+                if (lightbox && lightbox.open) {
+                    closeLightbox(false);
+                }
+            }
+        } finally {
+            window.DocAccess.isHandlingHashChange = false;
+        }
+    });
+
+    window.addEventListener('message', function (event) {
+
+        const iframe = document.getElementById('docbox-iframe');
+        const lightbox = document.getElementById('docbox-overlay');
+
+        if (!iframe || !lightbox || !lightbox.open) {
+            return;
+        }
+
+        try {
+
+            if (!iframe.src || iframe.src === 'about:blank' || iframe.src === '') {
+
+                if (!event.origin.endsWith('docaccess.com') && !event.origin.includes('localhost')) {
+                    return;
+                }
+            } else {
+                const iframeOrigin = new URL(iframe.src).origin;
+
+                const isFromDocAccess = event.origin.endsWith('docaccess.com') || event.origin === 'https://docaccess.com';
+                const isSameOrigin = event.origin === iframeOrigin;
+                const isLocalhost = event.origin.includes('localhost') || iframeOrigin.includes('localhost');
+
+                if (!isSameOrigin && !isFromDocAccess && !isLocalhost) {
+                    return;
+                }
+            }
+        } catch (e) {
+
+            if (!event.origin.endsWith('docaccess.com') && !event.origin.includes('localhost')) {
+                return;
+            }
+        }
+
+        if (event.data && typeof event.data === 'object') {
+            if (event.data.type === 'docaccess-close-viewer') {
+
+                closeLightbox(true);
+
+                announceToScreenReader('Document viewer closed', 2000);
+            } else if (event.data.type === 'docaccess-escape-hint') {
+
+                showEscapeHint();
+            } else if (event.data.type === 'docaccess-check-file-hash') {
+                if (window.DocAccess.versionCheckDisabled) {
+                    window.DocAccess._log('[DocAccess] Version checking disabled for this domain, skipping hash check');
+                    return;
+                }
+                queueHashCheckRequest(event.data, event.source, event.origin);
+                loadVersionChecker();
+            } else if (event.data.type === 'docaccess-navigate') {
+
+                handleDocviewerNavigate(event.data);
+            }
+        }
+    });
+
+    function handleDocviewerNavigate(data) {
+        const urlHash = data && data.urlHash;
+        if (!urlHash) return;
+
+        const domain = (data.domain) || '';
+        const pdfUrl = (data.pdfUrl) || '';
+        const title = data.title || null;
+        const pageFragment = parseInt(data.pageFragment, 10) > 0 ? parseInt(data.pageFragment, 10) : null;
+
+        const resolvedHash = (window.DocAccess.resolveSymlinkHash)
+            ? window.DocAccess.resolveSymlinkHash(urlHash)
+            : urlHash;
+
+        window.DocAccess.activeLightbox = {
+            resolvedHash: resolvedHash,
+            domain: domain
+        };
+
+        const newHash = '#docaccess-' + urlHash;
+        if (window.location.hash === newHash) {
+            return;
+        }
+
+        const currentUrlWithoutHash = window.location.href.split('#')[0];
+        const state = {
+            docaccess: true,
+            pdfUrl: pdfUrl,
+            direct: false,
+            domain: domain,
+            docHash: urlHash,
+            title: title,
+            pageFragment: pageFragment
+        };
+
+        try {
+            window.history.pushState(state, '', currentUrlWithoutHash + newHash);
+        } catch (e) {
+            window.DocAccess._log('docaccess-navigate: pushState failed', e);
+            return;
+        }
+
+        window.DocAccess.currentLightboxState = {
+            hash: newHash,
+            pdfUrl: pdfUrl,
+            direct: false,
+            domain: domain,
+            docHash: urlHash,
+            title: title,
+            pageFragment: pageFragment
+        };
+    }
+
+    if (!window.DocAccess.pendingHashCheckRequests) {
+        window.DocAccess.pendingHashCheckRequests = [];
+    }
+
+    function queueHashCheckRequest(data, source, origin) {
+        const senderFrame = document.getElementById('docbox-iframe');
+        const frame = (senderFrame && senderFrame.contentWindow === source) ? senderFrame : null;
+        window.DocAccess.pendingHashCheckRequests.push({ data, source, origin, frame });
+        window.DocAccess._log('[DocAccess] Queued hash check request for:', data.url);
+    }
+
+    function loadVersionChecker() {
+        if (window.DocAccess.versionCheckerLoaded) {
+
+            processPendingHashCheckRequests();
+            return;
+        }
+
+        if (window.DocAccess.versionCheckerLoading) {
+            return;
+        }
+
+        window.DocAccess.versionCheckerLoading = true;
+
+        const script = document.createElement('script');
+        script.src = window.DocAccess.scriptOrigin + '/docbox-check-document-version.js';
+        script.async = true;
+        script.onload = function () {
+            window.DocAccess._log('[DocAccess] Version checker module loaded');
+
+            processPendingHashCheckRequests();
+        };
+        script.onerror = function () {
+            window.DocAccess._log('[DocAccess] Failed to load version checker module');
+            window.DocAccess.versionCheckerLoading = false;
+        };
+        document.head.appendChild(script);
+    }
+
+    function processPendingHashCheckRequests() {
+        if (!window.DocAccess.pendingHashCheckRequests ||
+            window.DocAccess.pendingHashCheckRequests.length === 0) {
+            return;
+        }
+
+        window.DocAccess._log('[DocAccess] Processing', window.DocAccess.pendingHashCheckRequests.length, 'pending hash check requests');
+
+        if (window.DocAccess.handleHashCheckRequest) {
+            while (window.DocAccess.pendingHashCheckRequests.length > 0) {
+                const { data, source, origin, frame } = window.DocAccess.pendingHashCheckRequests.shift();
+                window.DocAccess.handleHashCheckRequest(data, source, origin, frame);
+            }
+        } else {
+            window.DocAccess._log('[DocAccess] Version checker handleHashCheckRequest not available');
+        }
+    }
+
+    function showEscapeHint() {
+
+        const existingHint = document.getElementById('docbox-escape-hint');
+        if (existingHint) {
+            existingHint.remove();
+        }
+
+        const hint = document.createElement('div');
+        hint.id = 'docbox-escape-hint';
+        hint.style.cssText = `
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 15px 30px;
+            border-radius: 5px;
+            font-size: 16px;
+            z-index: 19999999;
+            pointer-events: none;
+        `;
+        hint.textContent = 'Press Escape again to close document';
+        hint.setAttribute('role', 'status');
+        hint.setAttribute('aria-live', 'polite');
+        getLightboxContainer().appendChild(hint);
+
+        setTimeout(() => {
+            if (hint.parentNode) {
+                hint.parentNode.removeChild(hint);
+            }
+        }, 3500);
+    }
+
+    function announceToScreenReader(message, duration = 3000) {
+        const announcement = document.createElement('div');
+        announcement.setAttribute('role', 'status');
+        announcement.setAttribute('aria-live', 'polite');
+        announcement.className = 'sr-only';
+        announcement.textContent = message;
+        getLightboxContainer().appendChild(announcement);
+
+        setTimeout(() => {
+            if (announcement.parentNode) {
+                announcement.parentNode.removeChild(announcement);
+            }
+        }, duration);
+    }
+
+    function buildDocboxIframe() {
+        const iframe = document.createElement('iframe');
+        iframe.id = 'docbox-iframe';
+        iframe.style.cssText = `
+width: 100%;
+height: 100%;
+border: none;
+border-radius: 5px;
+`;
+        iframe.allow = DocAccess.currentDomain.endsWith('docaccess.com')
+            ? 'clipboard-write; autoplay'
+            : 'clipboard-write';
+
+        iframe.ariaLabel = 'Document viewer';
+
+        if (
+            (typeof document.fullscreenEnabled !== 'undefined' && document.fullscreenEnabled) ||
+            (typeof document.webkitFullscreenEnabled !== 'undefined' && document.webkitFullscreenEnabled) ||
+            (typeof document.mozFullScreenEnabled !== 'undefined' && document.mozFullScreenEnabled) ||
+            (typeof document.msFullscreenEnabled !== 'undefined' && document.msFullscreenEnabled)
+        ) {
+            iframe.allowFullscreen = true;
+        }
+
+        return iframe;
+    }
+
+    function createLightbox() {
+        if (!document.querySelector('style[data-docbox-styles]')) {
+            const style = document.createElement('style');
+            style.setAttribute('data-docbox-styles', 'true');
+            style.textContent = `
+                #docbox-overlay {
+                    padding: 0 !important;
+                    margin: 0 !important;
+                    border: none !important;
+                    width: 100vw !important;
+                    height: 100vh !important;
+                    min-width: 0 !important;
+                    min-height: 0 !important;
+                    max-width: 100vw !important;
+                    max-height: 100vh !important;
+                    inset: 0 !important;
+                    position: fixed !important;
+                    background: transparent !important;
+                    overflow: hidden !important;
+                    color-scheme: normal !important;
+                    transform: none !important;
+                    filter: none !important;
+                    perspective: none !important;
+                    backdrop-filter: none !important;
+                    will-change: auto !important;
+                    contain: none !important;
+                    animation: none !important;
+                    transition: none !important;
+                    mask: none !important;
+                    clip-path: none !important;
+                    translate: none !important;
+                    rotate: none !important;
+                    scale: none !important;
+                    box-shadow: none !important;
+                    opacity: 1 !important;
+                    visibility: visible !important;
+                    pointer-events: auto !important;
+                    z-index: 2147483647 !important;
+                }
+                #docbox-overlay[open] {
+                    display: flex !important;
+                    justify-content: center !important;
+                    align-items: end !important;
+                }
+                #docbox-overlay:not([open]) {
+                    display: none !important;
+                }
+                #docbox-overlay::backdrop {
+                    background-color: rgba(0, 0, 0, 0.8);
+                }
+                .sr-only {
+                    position: absolute;
+                    width: 1px;
+                    height: 1px;
+                    padding: 0;
+                    margin: -1px;
+                    overflow: hidden;
+                    clip: rect(0, 0, 0, 0);
+                    white-space: nowrap;
+                    border: 0;
+                }
+                @keyframes docaccess-pulse {
+                    0% {
+                        box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.4);
+                    }
+                    50% {
+                        box-shadow: 0 0 0 10px rgba(37, 99, 235, 0);
+                    }
+                    100% {
+                        box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
+                    }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+
+        const lightbox = document.createElement('dialog');
+        lightbox.id = 'docbox-overlay';
+
+        const container = document.createElement('div');
+        container.id = 'docbox-container';
+        container.style.cssText = `
+width: 100%;
+height: calc(100% - 40px);
+background-color: transparent;
+position: relative;
+border-radius: 5px;
+box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+`;
+
+        const closeBtn = document.createElement('button');
+        closeBtn.id = 'docbox-close';
+        closeBtn.innerHTML = '<span aria-hidden="true">Close <b>&nbsp;&times;</b></span>';
+        closeBtn.setAttribute('aria-label', 'Close document');
+        closeBtn.style.cssText = `
+    position: fixed;
+    top: 5px;
+    right: 5px;
+    font-size: 20px;
+    cursor: pointer;
+    z-index: 10001;
+    border-radius: 5px;
+    height: 30px;
+    width: auto;
+    line-height: 30px;
+    background: rgb(0, 0, 0) !important;
+    border: none !important;
+    color: white !important;
+    padding: 0 15px;
+    font-size: 16px;
+`;
+        closeBtn.addEventListener('click', function () { closeLightbox(true); });
+
+        const iframe = buildDocboxIframe();
+
+        container.appendChild(closeBtn);
+        container.appendChild(iframe);
+        lightbox.appendChild(container);
+        getLightboxContainer().appendChild(lightbox);
+
+        lightbox.addEventListener('click', function (e) {
+            if (e.target === lightbox) {
+                closeLightbox(true);
+            }
+        });
+
+        lightbox.addEventListener('cancel', function (e) {
+            e.preventDefault();
+        });
+
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && lightbox.open) {
+                try {
+                    const currentTime = Date.now();
+
+                    if (currentTime - lastEscapeTime < DOUBLE_ESCAPE_THRESHOLD) {
+
+                        closeLightbox(true);
+                        lastEscapeTime = 0;
+
+                        announceToScreenReader('Document viewer closed', 2000);
+                    } else {
+
+                        lastEscapeTime = currentTime;
+
+                        announceToScreenReader('Press Escape again to close');
+
+                        try {
+                            const iframe = document.getElementById('docbox-iframe');
+                            const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                            if (iframeDoc) {
+
+                                const openDialogs = iframeDoc.querySelectorAll('[role="dialog"]:not([style*="display: none"])');
+                                const visibleTooltips = iframeDoc.querySelectorAll('.tooltip:not([hidden])');
+
+                                if (openDialogs.length === 0 && visibleTooltips.length === 0) {
+
+                                    showEscapeHint();
+                                }
+                            }
+                        } catch (e) {
+
+                            showEscapeHint();
+                        }
+                    }
+                } catch (error) {
+                    console.error('DocBox: Error handling Escape key:', error);
+
+                    try {
+                        closeLightbox(true);
+                    } catch (e) {
+                        console.error('DocBox: Failed to close lightbox after error:', e);
+                    }
+                }
+            }
+        });
+    }
+
+    function buildDocviewerUrl(pdfUrl, { base, urlHash, domain, title, direct, pageFragment } = {}) {
+        let url = direct
+            ? pdfUrl
+            : `${base}/docviewer.html?url=${encodeURIComponent(pdfUrl)}`;
+        if (!direct && urlHash) url += `&url_hash=${encodeURIComponent(urlHash)}`;
+        if (domain) url += `&domain=${encodeURIComponent(domain)}`;
+        if (title) url += `&title=${encodeURIComponent(title)}`;
+        if (window.DocAccess.defaultTranscriptView) url += '&view=transcript';
+        if (window.DocAccess.versionCheckDisabled) url += '&vcd=1';
+        if (!direct) {
+            try {
+                const foundOn = (window.location.href || '').split('#')[0];
+                if (/^https?:/i.test(foundOn)) {
+                    url += `&found_on=${encodeURIComponent(foundOn)}`;
+                }
+            } catch (e) { }
+        }
+        const lang = window.DocAccess.getDetectedLanguage ? window.DocAccess.getDetectedLanguage() : null;
+        window.DocAccess._log('Opening docviewer, detectedLang:', lang);
+        if (lang && !lang.startsWith('en')) {
+            url += `&lang=${encodeURIComponent(lang)}`;
+            window.DocAccess._log('Adding lang param to docviewer URL:', lang);
+        }
+        if (pageFragment) {
+            url = url.split('#')[0] + `#page=${pageFragment}`;
+        }
+        return url;
+    }
+
+    function resolveScriptRoot() {
+        let scriptDomain = '';
+        let scriptSrc = '';
+        if (document.currentScript && document.currentScript.src) {
+            scriptSrc = document.currentScript.src;
+        } else {
+            const scripts = document.getElementsByTagName('script');
+            for (let i = 0; i < scripts.length; i++) {
+                if (scripts[i].src && scripts[i].src.match(/docbox\.js(\?.*)?$/)) {
+                    scriptSrc = scripts[i].src;
+                    break;
+                }
+            }
+        }
+        if (scriptSrc) {
+            try {
+                const url = new URL(scriptSrc, window.location.origin);
+                scriptDomain = url.hostname;
+            } catch (e) {
+                scriptDomain = '';
+            }
+        }
+
+        let scriptRoot = 'https://' + scriptDomain;
+        if (!scriptDomain || window.DocAccess.currentDomain == 'localhost') {
+            scriptRoot = 'https://docaccess.com';
+        } else if (window.DocAccess.currentDomain === 'docaccess.com') {
+            scriptRoot = 'https://docaccess.com';
+        }
+        return scriptRoot;
+    }
+
+    function keepLightboxInteractive(lightbox) {
+        if (!lightbox) return;
+        if (lightbox.hasAttribute('inert')) lightbox.removeAttribute('inert');
+        if (lightbox.getAttribute('aria-hidden') === 'true') lightbox.removeAttribute('aria-hidden');
+    }
+
+    function isLightboxModal(lightbox) {
+        try {
+            return lightbox.matches(':modal');
+        } catch (e) {
+            return lightbox.open;
+        }
+    }
+
+    function ensureLightboxOnTop(lightbox) {
+        if (!lightbox) return;
+        if (typeof lightbox.showModal !== 'function') {
+            lightbox.setAttribute('open', '');
+            return;
+        }
+        if (lightbox.open && !isLightboxModal(lightbox)) {
+            try {
+                lightbox.close();
+            } catch (e) {
+                lightbox.removeAttribute('open');
+            }
+        }
+        if (!lightbox.open) {
+            try {
+                lightbox.showModal();
+            } catch (e) {
+                console.error('DocBox: showModal failed, falling back to .show()', e);
+            }
+        }
+        if (!lightbox.open) {
+            try { lightbox.show(); } catch (e) { }
+        }
+        if (!lightbox.open) {
+            lightbox.setAttribute('open', '');
+        }
+    }
+
+    async function openLightbox(pdfUrl, direct = false, domain = '', fromLink = null, title = null, providedHash = null, pageFragment = null) {
+
+        if (window !== window.top) {
+            try {
+                const parentDocBox = window.parent.DocBox;
+                if (parentDocBox && typeof parentDocBox.open === 'function') {
+                    parentDocBox.open(pdfUrl, direct, domain, null, title, providedHash, pageFragment);
+                    return;
+                }
+            } catch (e) {
+
+            }
+        }
+
+        const lightbox = document.getElementById('docbox-overlay');
+        const iframe = document.getElementById('docbox-iframe');
+
+        if (fromLink) {
+            window.DocAccess.lastActivatedLink = fromLink;
+        }
+
+        const docHash = providedHash || await window.DocAccess.generateSHA256(pdfUrl);
+
+        let resolvedHash = window.DocAccess.resolveSymlinkHash(docHash);
+
+        window.DocAccess.activeLightbox = {
+            resolvedHash: resolvedHash,
+            domain: domain
+        };
+
+        const shouldAddHistory = !window.DocAccess.isHandlingHashChange &&
+            !window.location.hash;
+
+        if (shouldAddHistory) {
+
+            const hash = `#docaccess-${docHash}`;
+
+            window.DocAccess.currentLightboxState = {
+                hash: hash,
+                pdfUrl: pdfUrl,
+                direct: direct,
+                domain: domain,
+                docHash: docHash,
+                title: title,
+                pageFragment: pageFragment
+            };
+
+            const currentUrlWithoutHash = window.location.href.split('#')[0];
+            window.history.pushState(
+                { docaccess: true, pdfUrl: pdfUrl, direct: direct, domain: domain, docHash: docHash, title: title, pageFragment: pageFragment },
+                '',
+                currentUrlWithoutHash + hash
+            );
+        }
+
+        const docviewerUrl = buildDocviewerUrl(pdfUrl, {
+            base: resolveScriptRoot(),
+            urlHash: resolvedHash,
+            domain: domain,
+            title: title,
+            direct: direct,
+            pageFragment: pageFragment
+        });
+
+        window.DocAccess._log('Final docviewer URL:', docviewerUrl);
+        iframe.src = docviewerUrl;
+
+        ensureLightboxOnTop(lightbox);
+        window.DocAccess._lightboxRepromotes = 2;
+
+        try {
+            keepLightboxInteractive(lightbox);
+            if (typeof MutationObserver === 'function') {
+                inertGuardObserver = new MutationObserver(function () {
+                    keepLightboxInteractive(lightbox);
+                });
+                inertGuardObserver.observe(lightbox, {
+                    attributes: true,
+                    attributeFilter: ['inert', 'aria-hidden']
+                });
+            }
+        } catch (_) {}
+
+        document.body.style.overflow = 'hidden';
+
+        iframe.focus();
+
+        iframe.addEventListener('load', function handleIframeLoad() {
+
+            iframe.removeEventListener('load', handleIframeLoad);
+
+            iframe.focus();
+
+            try {
+                const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                if (iframeDoc && iframeDoc.body) {
+
+                    iframeDoc.addEventListener('keydown', function (e) {
+                        if (e.key === 'Escape') {
+                            const currentTime = Date.now();
+
+                            if (currentTime - lastEscapeTime < DOUBLE_ESCAPE_THRESHOLD) {
+
+                                closeLightbox(true);
+                                lastEscapeTime = 0;
+
+                                announceToScreenReader('Document closed', 2000);
+                            } else {
+
+                                lastEscapeTime = currentTime;
+
+                                announceToScreenReader('Press Escape again to close');
+
+                                const openDialogs = iframeDoc.querySelectorAll('[role="dialog"]:not([style*="display: none"])');
+                                const visibleTooltips = iframeDoc.querySelectorAll('.tooltip:not([hidden])');
+
+                                if (openDialogs.length === 0 && visibleTooltips.length === 0) {
+
+                                    showEscapeHint();
+                                }
+                            }
+                        }
+                    });
+
+                    iframeDoc.body.focus();
+                }
+            } catch (e) {
+
+            }
+        });
+
+        announceToScreenReader('Document opened. Escape twice to close.');
+    }
+
+    function closeLightbox(manipulateHistory = true) {
+        const lightbox = document.getElementById('docbox-overlay');
+        const iframe = document.getElementById('docbox-iframe');
+
+        if (lightbox) {
+            if (typeof lightbox.close === 'function') {
+                if (lightbox.open) {
+                    try {
+                        lightbox.close();
+                    } catch (e) {
+                        console.error('DocBox: dialog.close failed', e);
+                        lightbox.removeAttribute('open');
+                    }
+                }
+            } else {
+                lightbox.removeAttribute('open');
+            }
+        }
+
+        if (iframe) {
+            iframe.replaceWith(buildDocboxIframe());
+        }
+
+        document.body.style.overflow = '';
+
+        try {
+            if (inertGuardObserver) {
+                inertGuardObserver.disconnect();
+                inertGuardObserver = null;
+            }
+        } catch (_) {}
+
+        lastEscapeTime = 0;
+        window.DocAccess._lightboxRepromotes = 0;
+
+        const escapeHint = document.getElementById('docbox-escape-hint');
+        if (escapeHint) {
+            escapeHint.remove();
+        }
+
+        const tooltip = document.getElementById('transcript-view-tooltip');
+        if (tooltip) {
+            tooltip.parentNode.removeChild(tooltip);
+        }
+
+        if (manipulateHistory && !window.DocAccess.isHandlingHashChange) {
+
+            if (window.location.hash.startsWith('#docaccess-')) {
+
+                const currentUrl = window.location.href.split('#')[0];
+
+                window.history.pushState(null, '', currentUrl);
+            }
+        }
+
+        if (window.DocAccess.lastActivatedLink) {
+
+            window.DocAccess.lastActivatedLink.classList.add('docaccess-returning-focus');
+
+            window.DocAccess.lastActivatedLink.focus();
+
+            announceToScreenReader('Returned to document link');
+
+            setTimeout(() => {
+                if (window.DocAccess.lastActivatedLink) {
+                    window.DocAccess.lastActivatedLink.classList.remove('docaccess-returning-focus');
+                }
+            }, 2000);
+        }
+    }
+
+    function getLightboxContainer() {
+
+        if (document.querySelector('frameset')) {
+
+            return document.documentElement;
+        }
+
+        if (document.body) {
+            return document.body;
+        }
+
+        return document.documentElement;
+    }
+
+    function collectLinksFromDocument(doc, selector) {
+        const links = [];
+
+        links.push(...doc.querySelectorAll(selector));
+
+        try {
+
+            const frames = doc.querySelectorAll('frame, iframe');
+            frames.forEach(frame => {
+                try {
+                    const frameDoc = frame.contentDocument || frame.contentWindow?.document;
+                    if (frameDoc && frameDoc.readyState === 'complete') {
+                        links.push(...collectLinksFromDocument(frameDoc, selector));
+                    }
+                } catch (e) {
+
+                }
+            });
+
+            if (doc.defaultView && doc.defaultView.frames) {
+                for (let i = 0; i < doc.defaultView.frames.length; i++) {
+                    try {
+                        const frameDoc = doc.defaultView.frames[i].document;
+                        if (frameDoc && frameDoc.readyState === 'complete') {
+                            links.push(...collectLinksFromDocument(frameDoc, selector));
+                        }
+                    } catch (e) {
+
+                    }
+                }
+            }
+        } catch (e) {
+
+        }
+
+        return links;
+    }
+
+    if (!window.DocAccess.activationRegistry) {
+        window.DocAccess.activationRegistry = new WeakMap();
+    }
+    window.DocAccess.getActivationState = function (element) {
+        return window.DocAccess.activationRegistry.get(element) || null;
+    };
+
+    async function processDocAccessUrl(element, sourceUrl) {
+
+        const isForceEnable = element.classList.contains('docbox-direct')
+            || element.classList.contains('docbox-enable')
+            || element.classList.contains('docbox-enable-viewer');
+
+        const prebakedHash = element.classList.contains('docbox-enable')
+            && element.dataset.urlHash
+            ? element.dataset.urlHash
+            : null;
+
+        const cleanedUrl = window.DocAccess.cleanTrackingParams(sourceUrl);
+        const normalizedUrl = await window.DocAccess.normalizeUrlWithManifestCheck(cleanedUrl);
+
+        const hash = await window.DocAccess.generateSHA256(normalizedUrl);
+        if (!element.parentNode) return null;
+
+        const resolvedHash = prebakedHash || window.DocAccess.resolveSymlinkHash(hash);
+        const urlStatus = window.DocAccess.getUrlStatus(hash, isForceEnable);
+
+        for (let i = element.classList.length - 1; i >= 0; i--) {
+            const c = element.classList[i];
+            if (c.indexOf('docaccess-status-') === 0) element.classList.remove(c);
+        }
+        element.classList.add('docaccess-status-' + urlStatus);
+
+        window.DocAccess.activationRegistry.set(element, {
+            status: urlStatus,
+            hash: resolvedHash,
+            normalizedUrl: normalizedUrl
+        });
+
+        return {
+            status: urlStatus,
+            hash: hash,
+            resolvedHash: resolvedHash,
+            normalizedUrl: normalizedUrl
+        };
+    }
+
+    function shouldAttachActivatedClickHandler(status, normalizedUrl) {
+        if (status === 'unprocessable' || status === 'disabled' || status === 'processing') {
+            return false;
+        }
+        if (status === 'new') {
+            const domainToSend = window.DocAccess.primaryDomain || window.DocAccess.currentDomain;
+            window.DocAccess.sendDomainLink(domainToSend, normalizedUrl);
+            return false;
+        }
+        if (window.DocAccess.viewerDisabled === true) return false;
+        return true;
+    }
+
+    function attachActivatedClickHandler(element, opts) {
+        const fallbackUrl = opts && opts.fallbackUrl;
+
+        element.addEventListener('click', async function (e) {
+            if (isInCmsLiveEdit()) return;
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+
+            const registryEntry = window.DocAccess.activationRegistry.get(this);
+
+            let linkUrl;
+            if (this.tagName === 'A') {
+                linkUrl = (this.dataset.downloadurl && this.dataset.downloadurl.includes('wpdmdl='))
+                    ? this.dataset.downloadurl
+                    : this.href;
+            } else {
+                linkUrl = this.dataset.docaccessUrl
+                    || (registryEntry && registryEntry.normalizedUrl)
+                    || fallbackUrl
+                    || '';
+                if (linkUrl) {
+                    try { linkUrl = new URL(linkUrl, window.location.href).href; } catch (err) {}
+                }
+            }
+
+            const providedHash = registryEntry ? registryEntry.hash : null;
+            const elementDomain = this.dataset.docaccessDomain ||
+                window.DocAccess.primaryDomain || window.DocAccess.currentDomain || '';
+            const useDirect = this.classList.contains('docbox-direct') ||
+                this.classList.contains('docbox-enable-viewer');
+            const cleanUrl = window.DocAccess.cleanTrackingParams(linkUrl);
+            const pageFragment = window.DocAccess.extractPageFragment(linkUrl);
+
+            if (window.DocAccess.openInNewTab) {
+                const viewerUrl = buildDocviewerUrl(cleanUrl, {
+                    base: resolveScriptRoot(),
+                    urlHash: providedHash,
+                    domain: elementDomain,
+                    pageFragment: pageFragment
+                });
+                window.open(viewerUrl, '_blank', 'noopener');
+                return false;
+            }
+
+            window.DocAccess.lastActivatedLink = this;
+            const finalUrl = await window.DocAccess.normalizeUrlWithManifestCheck(cleanUrl);
+            openLightbox(finalUrl, useDirect, elementDomain, this, null, providedHash, pageFragment);
+            return false;
+        }, { capture: true });
+    }
+
+    if (!window.DocAccess._topLayerGuardInstalled) {
+        window.DocAccess._topLayerGuardInstalled = true;
+        document.addEventListener('toggle', function (e) {
+            const target = e.target;
+            if (!target || target.id === 'docbox-overlay') return;
+            if (typeof HTMLDialogElement === 'undefined' || !(target instanceof HTMLDialogElement)) return;
+            if (e.newState !== 'open') return;
+            if (!isLightboxModal(target)) return;
+            const lightbox = document.getElementById('docbox-overlay');
+            if (!lightbox || !lightbox.open) return;
+            const launchLink = window.DocAccess.lastActivatedLink;
+            if (!launchLink || !target.contains(launchLink)) return;
+            const budget = window.DocAccess._lightboxRepromotes || 0;
+            if (budget <= 0) return;
+            window.DocAccess._lightboxRepromotes = budget - 1;
+            try { lightbox.close(); } catch (err) { }
+            ensureLightboxOnTop(lightbox);
+            keepLightboxInteractive(lightbox);
+        }, true);
+    }
+
+    if (!window.DocAccess._delegatedClickInstalled) {
+        window.DocAccess._delegatedClickInstalled = true;
+        document.addEventListener('click', function (e) {
+            var link = e.target.closest
+                ? e.target.closest('.docaccess-status-enabled')
+                : null;
+            if (!link) return;
+            if (isInCmsLiveEdit()) return;
+            if (window.DocAccess.viewerDisabled && !window.DocAccess.overlayScriptActive) return;
+
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+
+            var registryEntry = window.DocAccess.activationRegistry &&
+                window.DocAccess.activationRegistry.get(link);
+
+            var sourceUrl;
+            if (link.tagName === 'A') {
+                sourceUrl = link.href;
+            } else {
+                sourceUrl = link.dataset.docaccessUrl
+                    || (registryEntry && registryEntry.normalizedUrl)
+                    || '';
+                if (sourceUrl) {
+                    try {
+                        sourceUrl = new URL(sourceUrl, window.location.href).href;
+                    } catch (err) {}
+                }
+            }
+            var hash = registryEntry ? registryEntry.hash : null;
+            var domain = link.dataset.docaccessDomain ||
+                window.DocAccess.primaryDomain || window.DocAccess.currentDomain || '';
+
+            var pageFragment = window.DocAccess.extractPageFragment(sourceUrl);
+
+            if (window.DocAccess.openInNewTab && window.DocBox) {
+                var cleanUrl = window.DocAccess.cleanTrackingParams(sourceUrl);
+                var viewerUrl = buildDocviewerUrl(cleanUrl, {
+                    base: resolveScriptRoot(),
+                    urlHash: hash,
+                    domain: domain,
+                    pageFragment: pageFragment
+                });
+                window.open(viewerUrl, '_blank', 'noopener');
+                return;
+            }
+
+            if (window.DocBox && window.DocBox.open) {
+                var cleanUrl = window.DocAccess.cleanTrackingParams(sourceUrl);
+                var direct = link.classList.contains('docbox-direct') || link.classList.contains('docbox-enable-viewer');
+                window.DocBox.open(cleanUrl, direct, domain, link, null, hash, pageFragment);
+            }
+        }, true);
+    }
+
+    function initPdfLinks(event, selector = window.DocAccess.commonFilePatterns) {
+
+        if (!window.DocAccess.domainDataLoaded) {
+            return;
+        }
+
+        if (window.DocAccess.isBatchProcessing) {
+            return;
+        }
+
+        if (!document.getElementById('docbox-overlay')) {
+            createLightbox();
+        }
+
+        const pdfLinks = collectLinksFromDocument(document, selector);
+
+        let includedLinks = [];
+        if (window.DocAccess.includedPaths && window.DocAccess.includedPaths.length > 0) {
+
+            const allLinks = collectLinksFromDocument(document, 'a[href]');
+
+            includedLinks = allLinks.filter(link => {
+                const linkHref = (link.dataset.downloadurl && link.dataset.downloadurl.includes('wpdmdl='))
+                    ? link.dataset.downloadurl
+                    : link.href;
+                return window.DocAccess.isUrlIncluded && window.DocAccess.isUrlIncluded(linkHref);
+            });
+        }
+
+        const allPdfLinks = [...new Set([...pdfLinks, ...includedLinks])];
+
+        const linksArray = Array.from(allPdfLinks);
+
+        const totalLinks = linksArray.length;
+        let processedLinks = 0;
+
+        if (totalLinks > 0) {
+            window.DocAccess.isBatchProcessing = true;
+        } else {
+
+            return;
+        }
+
+        const BATCH_SIZE = window.DocAccess.config.batchSize || 10;
+        const PROCESSING_DELAY = window.DocAccess.config.processingDelay || 0;
+        let currentIndex = 0;
+        let isPaused = false;
+        let pendingBatch = null;
+
+        function handleVisibilityChange() {
+            if (document.hidden) {
+                isPaused = true;
+            } else {
+                isPaused = false;
+
+                if (pendingBatch) {
+                    pendingBatch();
+                    pendingBatch = null;
+                }
+            }
+        }
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+
+        function processBatch() {
+            const endIndex = Math.min(currentIndex + BATCH_SIZE, linksArray.length);
+
+            for (let i = currentIndex; i < endIndex; i++) {
+                let link = linksArray[i];
+
+                if (window.DocAccess.processedLinks.has(link)) {
+                    if (window.DocAccess.processedLinks.get(link) === link.href) {
+                        processedLinks++;
+                        continue;
+                    }
+
+                    link.removeAttribute('data-docaccess-url');
+                    link.removeAttribute('data-docaccess-source-url');
+                    link.removeAttribute('data-url-hash');
+                    link.removeAttribute('data-url-status');
+                    link.classList.remove('docaccess-activated');
+                    for (let j = link.classList.length - 1; j >= 0; j--) {
+                        const c = link.classList[j];
+                        if (c.indexOf('docaccess-status-') === 0) link.classList.remove(c);
+                    }
+                    if (window.DocAccess.activationRegistry) {
+                        window.DocAccess.activationRegistry.delete(link);
+                    }
+                }
+
+                if (link.classList.contains('docbox-disabled')) {
+                    continue;
+                }
+
+                if (link.classList.contains('no-docbox')) {
+                    continue;
+                }
+
+                const linkHref = (link.dataset.downloadurl && link.dataset.downloadurl.includes('wpdmdl='))
+                    ? link.dataset.downloadurl
+                    : link.href;
+                const hasDocboxDirectClass = link.classList.contains('docbox-direct');
+                if (window.DocAccess.isUrlExcluded && window.DocAccess.isUrlExcluded(linkHref)) {
+                    if (hasDocboxDirectClass) {
+                        link.classList.remove('docbox-excluded');
+                    } else {
+                        link.classList.add('docbox-excluded');
+                        continue;
+                    }
+                }
+
+                if (link.id && link.id.length === 46 && link.id.startsWith('body_file-')) {
+
+                    let ancestor = link.parentNode, skip = false;
+                    for (let i = 0; i < 5 && ancestor; i++, ancestor = ancestor.parentNode)
+                        if (ancestor.classList?.contains('wysiwym-flow-content-element')) { skip = true; break; }
+                    if (skip) continue;
+                }
+
+                var editableAncestor = link.parentNode;
+                var skipEditable = false;
+                while (editableAncestor && editableAncestor !== document.body) {
+                    if (editableAncestor.getAttribute && editableAncestor.getAttribute('contenteditable') === 'true') {
+                        skipEditable = true;
+                        break;
+                    }
+                    editableAncestor = editableAncestor.parentNode;
+                }
+                if (skipEditable) continue;
+
+                const href = (link.dataset.downloadurl && link.dataset.downloadurl.includes('wpdmdl='))
+                    ? link.dataset.downloadurl
+                    : link.href;
+
+                const isViewerLink = link.classList.contains('docbox-enable-viewer');
+                if (href.includes('javascript:') ||
+                    href.includes('mailto:') ||
+                    href.includes('tel:') ||
+                    href.includes('plainText=true') || href.includes('plainText%3Dtrue') ||
+                    href.includes('?html=true') ||
+                    href.includes('&html=true') ||
+                    href.includes('media=true') ||
+                    (!isViewerLink && href.includes('/docviewer.html')) ||
+                    href === '' ||
+                    href === window.location.href) {
+                    continue;
+                }
+
+                try {
+                    const linkUrl = new URL(href);
+
+                    if (linkUrl.hash && (
+                        linkUrl.hash.startsWith('#/') ||
+                        linkUrl.hash.startsWith('#!/') ||
+                        linkUrl.hash.includes('/assets/') ||
+                        linkUrl.hash.includes('/admin/') ||
+                        linkUrl.hash.includes('/app/') ||
+                        linkUrl.hash.includes('/files/') ||
+                        linkUrl.hash.includes('/documents/')
+                    )) {
+                        continue;
+                    }
+                } catch (e) {
+
+                }
+
+                link.classList.add('docaccess-activated');
+                processedLinks++;
+
+                const hrefAtCapture = link.href;
+
+                (async () => {
+
+                    const linkUrl = (link.dataset.downloadurl && link.dataset.downloadurl.includes('wpdmdl='))
+                        ? link.dataset.downloadurl
+                        : hrefAtCapture;
+
+                    const result = await processDocAccessUrl(link, linkUrl);
+
+                    if (!result) return;
+
+                    window.DocAccess.processedLinks.set(link, hrefAtCapture);
+
+                    if (!shouldAttachActivatedClickHandler(result.status, result.normalizedUrl)) {
+                        return;
+                    }
+
+                    if (!link.parentNode) return;
+
+                    if (!link.getAttribute('role') || link.getAttribute('role') !== 'menuitem') {
+                        try {
+                            const oldLink = link.cloneNode(true);
+                            oldLink.removeAttribute('target');
+                            link.parentNode.replaceChild(oldLink, link);
+                            link = oldLink;
+
+                            window.DocAccess.activationRegistry.set(link, {
+                                status: result.status,
+                                hash: result.resolvedHash,
+                                normalizedUrl: result.normalizedUrl
+                            });
+                        } catch (error) {
+                            console.error('DocBox: Error during link replacement:', error, 'Link:', link.href);
+
+                        }
+                    }
+
+                    attachActivatedClickHandler(link, { fallbackUrl: result.normalizedUrl });
+                    link.removeAttribute('target');
+
+                    window.DocAccess.processedLinks.set(link, hrefAtCapture);
+                })().catch(error => {
+                    console.error('DocBox: Error processing link',
+                        (link.dataset.downloadurl && link.dataset.downloadurl.includes('wpdmdl='))
+                            ? link.dataset.downloadurl
+                            : link.href,
+                        error);
+                });
+            }
+
+            currentIndex = endIndex;
+
+            if (currentIndex < linksArray.length) {
+
+                if (isPaused || document.hidden) {
+
+                    pendingBatch = processBatch;
+                    return;
+                }
+
+                if (typeof requestIdleCallback !== 'undefined') {
+                    if (PROCESSING_DELAY > 0) {
+                        setTimeout(() => requestIdleCallback(processBatch), PROCESSING_DELAY);
+                    } else {
+                        requestIdleCallback(processBatch);
+                    }
+                } else {
+                    setTimeout(processBatch, PROCESSING_DELAY);
+                }
+            } else {
+
+                document.removeEventListener('visibilitychange', handleVisibilityChange);
+                window.DocAccess.isBatchProcessing = false;
+            }
+        }
+
+        processBatch();
+    }
+
+    window.DocAccess.loadCivicClerkIntegration = loadCivicClerkIntegration;
+
+    function loadCivicClerkIntegration() {
+
+        let tenantId = null;
+
+        const hostname = window.location.hostname.toLowerCase();
+        const isNativePortal = /^[a-z0-9.-]+\.portal\.civicclerk\.com$/.test(hostname);
+
+        if (isNativePortal) {
+
+            if (window.clerkEmbedProps && window.clerkEmbedProps.tenant && window.DocAccess.domainDataLoaded) {
+                tenantId = window.clerkEmbedProps.tenant;
+            } else {
+
+                return;
+            }
+        } else if (window.clerkEmbedProps && window.clerkEmbedProps.tenant) {
+
+            tenantId = window.clerkEmbedProps.tenant;
+        } else if (window.DocAccess.civicclerkTenant) {
+
+            tenantId = window.DocAccess.civicclerkTenant;
+            window.DocAccess._log('Using CivicClerk tenant from manifest:', tenantId);
+
+            window.clerkEmbedProps = window.clerkEmbedProps || {};
+            window.clerkEmbedProps.tenant = tenantId;
+        }
+
+        if (!tenantId) {
+            return;
+        }
+
+        const script = document.createElement('script');
+
+        let scriptSrc = '';
+        const currentScript = document.currentScript || (function () {
+            const scripts = document.getElementsByTagName('script');
+            for (let i = 0; i < scripts.length; i++) {
+                if (scripts[i].src && scripts[i].src.match(/docbox\.js(\?.*)?$/)) {
+                    return scripts[i];
+                }
+            }
+            return null;
+        })();
+
+        if (currentScript && currentScript.src) {
+            const url = new URL(currentScript.src);
+            scriptSrc = url.origin + '/docbox-civicclerk.js';
+        } else {
+
+            scriptSrc = 'https://docaccess.com/docbox-civicclerk.js';
+        }
+
+        script.src = scriptSrc;
+        script.async = true;
+        script.onload = function () {
+            window.DocAccess._log('CivicClerk integration loaded successfully');
+        };
+        script.onerror = function () {
+            console.error('DocAccess: Failed to load CivicClerk integration');
+        };
+
+        document.head.appendChild(script);
+    }
+
+    function loadLaserficheIntegration() {
+
+        const isLaserfichePage = (
+            /\/(DocView|Browse|ElectronicFile)\.aspx/i.test(window.location.pathname) ||
+            /\/edoc\/\d+/i.test(window.location.pathname) ||
+            document.querySelector('img[alt*="Laserfiche"], img[alt*="WebLink"]')
+        );
+
+        if (!isLaserfichePage) {
+            return;
+        }
+
+        window.DocAccess._log('Laserfiche WebLink detected, loading integration');
+
+        const script = document.createElement('script');
+
+        let scriptSrc = '';
+        const currentScript = document.currentScript || (function () {
+            const scripts = document.getElementsByTagName('script');
+            for (let i = 0; i < scripts.length; i++) {
+                if (scripts[i].src && scripts[i].src.match(/docbox\.js(\?.*)?$/)) {
+                    return scripts[i];
+                }
+            }
+            return null;
+        })();
+
+        if (currentScript && currentScript.src) {
+            const url = new URL(currentScript.src);
+            scriptSrc = url.origin + '/docbox-laserfiche.js';
+        } else {
+
+            scriptSrc = 'https://docaccess.com/docbox-laserfiche.js';
+        }
+
+        script.src = scriptSrc;
+        script.async = true;
+        script.onload = function () {
+            window.DocAccess._log('Laserfiche integration loaded successfully');
+        };
+        script.onerror = function () {
+            console.error('DocAccess: Failed to load Laserfiche integration');
+        };
+
+        document.head.appendChild(script);
+    }
+
+    window.DocAccess.loadLaserficheIntegration = loadLaserficheIntegration;
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function () {
+
+            if (!window.history.state || !window.history.state.docaccessInit) {
+                window.history.replaceState({
+                    docaccessInit: true,
+                    pageUrl: window.location.href,
+                    timestamp: Date.now()
+                }, '', window.location.href);
+            }
+
+            initPdfLinks();
+
+            checkInitialHash();
+
+            loadCivicClerkIntegration();
+
+            loadLaserficheIntegration();
+        });
+    } else {
+
+        if (!window.history.state || !window.history.state.docaccessInit) {
+            window.history.replaceState({
+                docaccessInit: true,
+                pageUrl: window.location.href,
+                timestamp: Date.now()
+            }, '', window.location.href);
+        }
+
+        initPdfLinks();
+
+        checkInitialHash();
+
+        loadCivicClerkIntegration();
+
+        loadLaserficheIntegration();
+    }
+
+    async function checkInitialHash() {
+        const currentHash = window.location.hash;
+        if (currentHash.startsWith('#docaccess-')) {
+
+            const docHash = currentHash.substring('#docaccess-'.length);
+
+            window.DocAccess.pendingDocHash = docHash;
+
+            if (!window.DocAccess.domainDataLoaded) {
+
+                const checkInterval = setInterval(() => {
+                    if (window.DocAccess.domainDataLoaded) {
+                        clearInterval(checkInterval);
+                        openDocumentFromHash(docHash);
+                    }
+                }, 100);
+
+                setTimeout(() => {
+                    clearInterval(checkInterval);
+                    if (!window.DocAccess.domainDataLoaded) {
+                        window.DocAccess._log('Timeout waiting for domain data');
+                    }
+                }, 10000);
+            } else {
+
+                openDocumentFromHash(docHash);
+            }
+        }
+    }
+
+    async function openDocumentFromHash(docHash) {
+
+        function isDocHashEnabled(hash) {
+            const key = window.DocAccess.lookupManifestKey(hash);
+            if (key === null) {
+                return false;
+            }
+
+            const value = window.DocAccess.domainDocumentLinkData[key];
+
+            if (value === true || value === 'deferred') {
+                return true;
+            }
+
+            if (value === 'unprocessable' || value === 'archived') {
+                return false;
+            }
+
+            if (typeof value === 'string') {
+                const resolved = window.DocAccess.resolveSymlinkValue(hash);
+                return resolved === true || resolved === 'deferred';
+            }
+
+            return false;
+        }
+
+        if (window.DocAccess.domainDocumentLinkData && isDocHashEnabled(docHash)) {
+            const findActivatedLink = () => {
+                const candidates = collectLinksFromDocument(document, '.docaccess-status-enabled');
+                for (const el of candidates) {
+                    const entry = window.DocAccess.getActivationState
+                        ? window.DocAccess.getActivationState(el)
+                        : null;
+                    if (entry && entry.hash === docHash) return el;
+                }
+                return null;
+            };
+
+            const link = findActivatedLink();
+            if (link) {
+                link.click();
+                return;
+            }
+
+            return new Promise((resolve) => {
+                let elapsed = 0;
+                const linkWaitMs = 1000;
+                const interval = setInterval(() => {
+                    elapsed += 100;
+                    const link = findActivatedLink();
+                    if (link) {
+                        clearInterval(interval);
+                        link.click();
+                        resolve();
+                        return;
+                    }
+                    if (elapsed >= linkWaitMs) {
+                        clearInterval(interval);
+                        const domain = window.DocAccess.primaryDomain || window.DocAccess.currentDomain || '';
+                        window.DocAccess._log('No matching link on page for hash', docHash, '; opening by hash (manifest-enabled).');
+                        openLightbox('', false, domain, null, null, docHash)
+                            .then(resolve, resolve);
+                    }
+                }, 100);
+            });
+        }
+
+        window.DocAccess._log('Hash fragment #docaccess-' + docHash + ' is not enabled in the manifest. Viewer will not open.');
+    }
+
+    let mutationHasOccurred = false;
+
+    const frameLoadWired = new WeakSet();
+    const wiredFrames = [];
+
+    const isFramesetPage = (function () {
+        try { return !!document.querySelector('frameset, frame'); }
+        catch (e) { return false; }
+    })();
+
+    function reattachDocBoxToFrame(frame) {
+        if (!frame || (frame.tagName !== 'FRAME' && frame.tagName !== 'IFRAME')) return;
+        let frameWin, frameDoc;
+        try {
+            frameWin = frame.contentWindow;
+            frameDoc = frame.contentDocument || (frameWin && frameWin.document);
+            void (frameWin && frameWin.location && frameWin.location.href);
+        } catch (e) {
+            return;
+        }
+        if (!frameDoc || !frameDoc.head || !frameDoc.documentElement) return;
+        try { if (frameWin.location.href === 'about:blank') return; }
+        catch (e) { return; }
+
+        const origin = window.DocAccess.scriptOrigin;
+        const docboxAlreadyRunning = frameWin.DocAccess && frameWin.DocAccess.initialized;
+
+        if (!docboxAlreadyRunning && !frameDoc.querySelector('script[src*="/docbox.js"]')) {
+            try {
+                const s = frameDoc.createElement('script');
+                s.src = origin + '/docbox.js';
+                s.async = true;
+                frameDoc.head.appendChild(s);
+                window.DocAccess._log('Frameset: injected docbox.js into', frame.src || frame.name || '(frame)');
+            } catch (e) {
+                window.DocAccess._log('Frameset: failed to inject docbox.js', e && e.message);
+            }
+        }
+
+        if (window.DocAccess.overlayScriptActive === true) {
+            if (!frameDoc.querySelector('script[src*="/docbox-overlay.js"]')) {
+                try {
+                    const s = frameDoc.createElement('script');
+                    s.src = origin + '/docbox-overlay.js';
+                    s.async = true;
+                    frameDoc.head.appendChild(s);
+                } catch (e) {  }
+            }
+            const overlayCssUrl = origin + '/static/docbox-overlay.css';
+            if (!frameDoc.querySelector(`link[href="${overlayCssUrl}"]`)) {
+                try {
+                    const l = frameDoc.createElement('link');
+                    l.rel = 'stylesheet';
+                    l.type = 'text/css';
+                    l.href = overlayCssUrl;
+                    frameDoc.head.appendChild(l);
+                } catch (e) {  }
+            }
+        }
+    }
+
+    let lastOverlayActive = false;
+    function syncOverlayToFrames() {
+        if (!isFramesetPage) return;
+        const active = window.DocAccess.overlayScriptActive === true;
+        if (active && !lastOverlayActive) {
+            wiredFrames.forEach(reattachDocBoxToFrame);
+        }
+        lastOverlayActive = active;
+    }
+
+    function wireFrameLoadForRescan(frame) {
+        if (!frame || frame.nodeType !== 1) return;
+        if (frame.tagName !== 'IFRAME' && frame.tagName !== 'FRAME') return;
+        if (frameLoadWired.has(frame)) return;
+        frameLoadWired.add(frame);
+        if (isFramesetPage) wiredFrames.push(frame);
+
+        frame.addEventListener('load', function () {
+            mutationHasOccurred = true;
+            if (isFramesetPage) reattachDocBoxToFrame(frame);
+        });
+
+        if (isFramesetPage) reattachDocBoxToFrame(frame);
+    }
+
+    function wireFramesInSubtree(root) {
+        if (!root || root.nodeType !== 1) return;
+        if (root.tagName === 'IFRAME' || root.tagName === 'FRAME') {
+            wireFrameLoadForRescan(root);
+        }
+        if (root.querySelectorAll) {
+            root.querySelectorAll('iframe, frame').forEach(wireFrameLoadForRescan);
+        }
+    }
+
+    const observer = new MutationObserver(function (mutations) {
+        mutationHasOccurred = true;
+        mutations.forEach(function (m) {
+            m.addedNodes.forEach(wireFramesInSubtree);
+        });
+    });
+
+    const observeRoot = document.body || document.documentElement;
+    if (observeRoot) {
+        observer.observe(observeRoot, { childList: true, subtree: true });
+    }
+
+    document.querySelectorAll('iframe, frame').forEach(wireFrameLoadForRescan);
+
+    function replaceGoogleDriveIframes() {
+
+        const googleDriveIframes = document.querySelectorAll('iframe[src*="drive.google.com/embeddedfolderview"]');
+
+        window.DocAccess.gdriveInstanceCounter = window.DocAccess.gdriveInstanceCounter || 0;
+
+        googleDriveIframes.forEach(iframe => {
+
+            if (iframe.hasAttribute('data-docaccess-replaced')) {
+                return;
+            }
+
+            const retryCount = parseInt(iframe.getAttribute('data-docaccess-retry-count') || '0');
+            if (retryCount >= 2) {
+                return;
+            }
+
+            try {
+                const src = iframe.src;
+                const url = new URL(src);
+
+                let folderId = null;
+
+                const idMatch = url.searchParams.get('id');
+                if (idMatch) {
+                    folderId = idMatch;
+                } else {
+
+                    const pathMatch = url.pathname.match(/embeddedfolderview\/([a-zA-Z0-9_-]+)/);
+                    if (pathMatch) {
+                        folderId = pathMatch[1];
+                    }
+                }
+
+                if (folderId) {
+
+                    const instanceNum = window.DocAccess.gdriveInstanceCounter;
+                    if (instanceNum >= 10) {
+                        return;
+                    }
+                    window.DocAccess.gdriveInstanceCounter++;
+
+                    const containerId = 'docaccess-gdrive-' + folderId.substring(0, 8).toLowerCase() + '-' + instanceNum;
+
+                    const container = document.createElement('div');
+                    container.className = 'docaccess-gdrive-replacement';
+
+                    const innerContainer = document.createElement('div');
+                    innerContainer.id = containerId;
+                    container.appendChild(innerContainer);
+
+                    if (iframe.style.width) container.style.width = iframe.style.width;
+
+                    if (iframe.style.border) container.style.border = iframe.style.border;
+
+                    iframe.setAttribute('data-docaccess-replaced', 'true');
+                    iframe.setAttribute('data-docaccess-retry-count', String(retryCount + 1));
+
+                    iframe.parentNode.insertBefore(container, iframe.nextSibling);
+
+                    const script = document.createElement('script');
+
+                    const pageParams = new URLSearchParams(window.location.search);
+                    const apiKey = pageParams.get('apiKey');
+
+                    let apiOrigin = 'https://docaccess.com';
+                    if (window.DocAccess.scriptOrigin) {
+                        apiOrigin = window.DocAccess.scriptOrigin;
+                    }
+
+                    let scriptSrc = `${apiOrigin}/api/google-drive?url=${encodeURIComponent(src)}&instance=${instanceNum}`;
+                    if (apiKey) {
+                        scriptSrc += `&apiKey=${encodeURIComponent(apiKey)}`;
+                    }
+
+                    script.src = scriptSrc;
+                    script.setAttribute('data-container-id', containerId);
+
+                    getLightboxContainer().appendChild(script);
+
+                }
+            } catch (e) {
+
+            }
+        });
+    }
+
+    function replaceSharePointIframes() {
+
+        const sharePointIframes = document.querySelectorAll('iframe[src*="sharepoint.com"]');
+
+        window.DocAccess.sharepointInstanceCounter = window.DocAccess.sharepointInstanceCounter || 0;
+
+        sharePointIframes.forEach(iframe => {
+
+            if (iframe.hasAttribute('data-docaccess-replaced')) {
+                return;
+            }
+
+            const src = iframe.src || '';
+            if (src.indexOf('/:f:/') === -1) {
+                return;
+            }
+
+            const retryCount = parseInt(iframe.getAttribute('data-docaccess-retry-count') || '0');
+            if (retryCount >= 2) {
+                return;
+            }
+
+            try {
+                const instanceNum = window.DocAccess.sharepointInstanceCounter;
+                if (instanceNum >= 10) {
+                    return;
+                }
+                window.DocAccess.sharepointInstanceCounter++;
+
+                const container = document.createElement('div');
+                container.className = 'docaccess-sharepoint-replacement';
+
+                if (iframe.style.width) container.style.width = iframe.style.width;
+                if (iframe.style.border) container.style.border = iframe.style.border;
+
+                iframe.setAttribute('data-docaccess-replaced', 'true');
+                iframe.setAttribute('data-docaccess-retry-count', String(retryCount + 1));
+
+                iframe.parentNode.insertBefore(container, iframe.nextSibling);
+
+                let apiOrigin = 'https://docaccess.com';
+                if (window.DocAccess.scriptOrigin) {
+                    apiOrigin = window.DocAccess.scriptOrigin;
+                }
+
+                const script = document.createElement('script');
+                script.src = `${apiOrigin}/api/sharepoint?url=${encodeURIComponent(src)}&instance=${instanceNum}`;
+                container.appendChild(script);
+
+            } catch (e) {
+
+            }
+        });
+    }
+
+    function wireSharePointFolderLinks() {
+        const links = document.querySelectorAll('a[href*="sharepoint.com"]');
+
+        window.DocAccess.sharepointInstanceCounter = window.DocAccess.sharepointInstanceCounter || 0;
+
+        links.forEach(link => {
+            const href = link.getAttribute('href') || '';
+            if (href.indexOf('/:f:/') === -1) {
+                return;
+            }
+            if (link.getAttribute('data-docaccess-sp-wired') === 'true') {
+                return;
+            }
+            link.setAttribute('data-docaccess-sp-wired', 'true');
+
+            let apiOrigin = 'https://docaccess.com';
+            if (window.DocAccess.scriptOrigin) {
+                apiOrigin = window.DocAccess.scriptOrigin;
+            }
+
+            link.__docaccessSpState = 'pending';
+            const classify = fetch(`${apiOrigin}/api/sharepoint?fetch=folder-contents&url=${encodeURIComponent(href)}`)
+                .then(r => r.json())
+                .then(data => {
+                    const engage = !!(data && !data.skipReplacement && !data.error &&
+                        (((data.folders && data.folders.length) || (data.files && data.files.length))));
+                    link.__docaccessSpState = engage ? 'engage' : 'skip';
+                    if (engage) {
+                        link.setAttribute('aria-expanded', 'false');
+                    }
+                })
+                .catch(() => { link.__docaccessSpState = 'skip'; });
+
+            link.addEventListener('click', function (e) {
+                if (link.__docaccessSpState === 'skip') {
+                    return;
+                }
+                e.preventDefault();
+                if (link.__docaccessSpState === 'engage') {
+                    openSharePointFolderModal(link, href, apiOrigin);
+                    return;
+                }
+                // Still classifying: open the modal optimistically. It shows a
+                // loading state and, if the folder has nothing to preview, falls
+                // back to an "Open in SharePoint" action — so the click never
+                // dead-ends waiting on the pre-fetch.
+                openSharePointFolderModal(link, href, apiOrigin);
+            });
+        });
+    }
+
+    // --- SharePoint folder browser (isolated modal) -------------------------
+    // Rendered inside a Shadow DOM + native <dialog> attached to <body>, so no
+    // host-page CSS (flex button rows, overflow clipping, z-index, resets) can
+    // distort it and nothing we style leaks out. The <dialog> lives in the top
+    // layer with native focus-trapping and Esc-to-close.
+    const SP_ICONS = {
+        folder: '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="#0364b8" d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>',
+        pdf: '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="#d83b01" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm4 18H6V4h7v5h5v11zM10 13H8v-2h2v2zm0 4H8v-3h2v3zm4 0h-2v-6h2v6z"/></svg>',
+        doc: '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="#2b579a" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm4 18H6V4h7v5h5v11zM8 12h8v2H8v-2zm0 4h5v2H8v-2z"/></svg>',
+        xls: '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="#217346" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>',
+        ppt: '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="#d24726" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>',
+        file: '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="#5f6368" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>'
+    };
+    function spIcon(type) { return SP_ICONS[type] || SP_ICONS.file; }
+    function spEsc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+    const SP_MODAL_CSS = `
+    :host { all: initial; }
+    .ov { position: fixed; inset: 0; }
+    dialog {
+        border: none; border-radius: 12px; padding: 0; max-width: 560px; width: calc(100vw - 32px);
+        max-height: calc(100vh - 64px); box-shadow: 0 12px 48px rgba(0,0,0,.32);
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        color: #202124; background: #fff; overflow: hidden;
+    }
+    dialog::backdrop { background: rgba(0,0,0,.45); }
+    .hd { display: flex; align-items: center; gap: 12px; padding: 16px 18px; border-bottom: 1px solid #e8eaed; }
+    .hd .ttl { font-size: 16px; font-weight: 600; line-height: 1.3; flex: 1; margin: 0; word-break: break-word; }
+    .hd .x { flex: 0 0 auto; width: 32px; height: 32px; border: none; border-radius: 8px; background: transparent;
+        font-size: 22px; line-height: 1; color: #5f6368; cursor: pointer; }
+    .hd .x:hover { background: #f1f3f4; color: #202124; }
+    .hd .x:focus-visible { outline: 2px solid #0364b8; outline-offset: 2px; }
+    .bd { padding: 8px; overflow-y: auto; max-height: calc(100vh - 210px); }
+    .row { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; box-sizing: border-box;
+        padding: 10px 12px; margin: 2px 0; border: none; border-radius: 8px; background: transparent; cursor: pointer;
+        font-size: 14px; color: #202124; text-decoration: none; }
+    .row:hover { background: #f3f6fb; }
+    .row:focus-visible { outline: 2px solid #0364b8; outline-offset: -2px; }
+    .row svg { flex: 0 0 auto; }
+    .row .nm { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    .ft { padding: 12px 18px; border-top: 1px solid #e8eaed; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .ft a { color: #0364b8; font-size: 13px; text-decoration: none; }
+    .ft a:hover { text-decoration: underline; }
+    .ft .brand { font-size: 12px; color: #80868b; }
+    .msg { padding: 28px 18px; text-align: center; color: #5f6368; font-size: 14px; }
+    .spin { width: 26px; height: 26px; margin: 24px auto; border: 3px solid #e0e0e0; border-top-color: #0364b8;
+        border-radius: 50%; animation: sp-rot 0.8s linear infinite; }
+    @keyframes sp-rot { to { transform: rotate(360deg); } }
+    `;
+
+    function openSharePointFolderModal(link, href, apiOrigin) {
+        // Reuse an existing modal for this link if still attached.
+        if (link.__docaccessSpModal && link.__docaccessSpModal.isAlive()) {
+            link.__docaccessSpModal.open();
+            return;
+        }
+        const folderName = (link.textContent || 'SharePoint folder').trim();
+        // Stable identity: the path token grants access; the ?e= param is
+        // volatile, so drop the query for the share URL we pass on.
+        let stableShare = href;
+        try { const u = new URL(href, window.location.href); u.search = ''; u.hash = ''; stableShare = u.href; } catch (e) {}
+
+        const host = document.createElement('div');
+        host.className = 'docaccess-sp-modal-host';
+        const root = host.attachShadow({ mode: 'open' });
+        root.innerHTML = '<style>' + SP_MODAL_CSS + '</style>' +
+            '<dialog aria-label="' + spEsc(folderName) + ' — documents">' +
+            '<div class="hd"><h2 class="ttl">' + spEsc(folderName) + '</h2>' +
+            '<button class="x" type="button" aria-label="Close">×</button></div>' +
+            '<div class="bd"><div class="spin" role="status" aria-label="Loading documents"></div></div>' +
+            '<div class="ft"><a class="ext" href="' + spEsc(href) + '" target="_blank" rel="noopener">Open in SharePoint ↗</a>' +
+            '<span class="brand">DocAccess</span></div>' +
+            '</dialog>';
+        document.body.appendChild(host);
+
+        const dialog = root.querySelector('dialog');
+        const body = root.querySelector('.bd');
+        const restoreFocusTo = link;
+        root.querySelector('.x').addEventListener('click', () => dialog.close());
+        dialog.addEventListener('click', (e) => {
+            // Backdrop click (target is the dialog element itself, outside content).
+            if (e.target === dialog) {
+                const r = dialog.getBoundingClientRect();
+                if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) dialog.close();
+            }
+        });
+        dialog.addEventListener('close', () => { try { restoreFocusTo.focus(); } catch (e) {} });
+
+        const modal = {
+            isAlive: () => document.body.contains(host),
+            open: () => { if (!dialog.open) { try { dialog.showModal(); } catch (e) { host.remove(); } } },
+            renderList: (data) => {
+                const folders = data.folders || [];
+                const files = data.files || [];
+                let html = '';
+                folders.forEach(f => {
+                    html += '<a class="row" href="' + spEsc(f.url) + '" target="_blank" rel="noopener">' + spIcon('folder') +
+                        '<span class="nm">' + spEsc(f.name) + '</span></a>';
+                });
+                files.forEach(f => {
+                    const openUrl = f.download || f.url || '#';
+                    html += '<button class="row rowfile" type="button" data-open="' + spEsc(openUrl) + '" data-name="' + spEsc(f.name) + '">' +
+                        spIcon(f.type) + '<span class="nm">' + spEsc(f.name) + '</span></button>';
+                });
+                body.innerHTML = html || '<div class="msg">This folder has no previewable documents.</div>';
+                body.querySelectorAll('.rowfile').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const openUrl = btn.getAttribute('data-open');
+                        dialog.close();
+                        openSharePointFileInViewer(openUrl);
+                    });
+                });
+                const first = body.querySelector('.row'); if (first) { try { first.focus(); } catch (e) {} }
+                // Best-effort: submit the folder's PDFs for processing so they
+                // become accessible transcripts on a subsequent open.
+                try { submitSharePointFilesForProcessing(files); } catch (e) {}
+            },
+            renderEmpty: (msg) => {
+                body.innerHTML = '<div class="msg">' + spEsc(msg || 'These documents could not be previewed here. Use “Open in SharePoint” below.') + '</div>';
+            }
+        };
+        link.__docaccessSpModal = modal;
+        modal.open();
+
+        fetch(`${apiOrigin}/api/sharepoint?fetch=folder-contents&url=${encodeURIComponent(stableShare)}`)
+            .then(r => r.json())
+            .then(data => {
+                if (data && !data.error && !data.skipReplacement && ((data.files && data.files.length) || (data.folders && data.folders.length))) {
+                    modal.renderList(data);
+                } else {
+                    modal.renderEmpty(data && data.error);
+                }
+            })
+            .catch(() => modal.renderEmpty());
+    }
+
+    // Open a SharePoint file. Mirror DocBox's own gate exactly (getUrlStatus):
+    // only route into the accessible viewer when the document is *enabled* in the
+    // manifest for this domain. Anything else — disabled, processing, unprocessable,
+    // not-yet-ingested — opens the PDF as usual, so we never wire up a document
+    // DocBox itself wouldn't enable.
+    function openSharePointFileInViewer(openUrl) {
+        (async () => {
+            try {
+                if (window.DocBox && window.DocBox.open && window.DocAccess && window.DocAccess.domainDataLoaded
+                    && window.DocAccess.getUrlStatus) {
+                    const normalized = await window.DocAccess.normalizeUrlWithManifestCheck(openUrl);
+                    const hash = await window.DocAccess.generateSHA256(normalized);
+                    if (window.DocAccess.getUrlStatus(hash) === 'enabled') {
+                        const domain = window.DocAccess.primaryDomain || window.DocAccess.currentDomain || window.location.hostname;
+                        window.DocBox.open(openUrl, false, domain, null, null, hash);
+                        return;
+                    }
+                }
+            } catch (e) { }
+            // Not enabled → normal behavior: open the PDF.
+            window.open(openUrl, '_blank', 'noopener');
+        })();
+    }
+
+    function submitSharePointFilesForProcessing(files) {
+        if (!window.DocAccess || !window.DocAccess.sendDomainLink) return;
+        const domain = window.DocAccess.primaryDomain || window.DocAccess.currentDomain || window.location.hostname;
+        (files || []).forEach(f => {
+            const u = f.download || f.url;
+            if (u && (f.type === 'pdf' || /\.pdf$/i.test(f.name || ''))) {
+                try { window.DocAccess.sendDomainLink(domain, u); } catch (e) {}
+            }
+        });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function () {
+            replaceGoogleDriveIframes();
+            replaceSharePointIframes();
+            wireSharePointFolderLinks();
+        });
+    } else {
+
+        setTimeout(replaceGoogleDriveIframes, 100);
+        setTimeout(replaceSharePointIframes, 100);
+        setTimeout(wireSharePointFolderLinks, 100);
+    }
+
+    if (!window.DocAccess.processedDocIframes) {
+        window.DocAccess.processedDocIframes = new WeakSet();
+    }
+
+    function replaceDocumentIframes() {
+        if (!window.DocAccess.domainDataLoaded) return;
+
+        const iframes = document.querySelectorAll('iframe[data-docaccess-url], iframe[src]');
+
+        iframes.forEach(async (iframe) => {
+            if (window.DocAccess.processedDocIframes.has(iframe)) return;
+            if (iframe.hasAttribute('data-docaccess-replaced')) return;
+
+            const explicitUrl = iframe.dataset.docaccessUrl;
+            const src = iframe.src;
+
+            const rawUrl = explicitUrl || src;
+            if (!rawUrl || rawUrl === 'about:blank') return;
+
+            if (!rawUrl.startsWith('http')) return;
+
+            if (rawUrl.includes('docaccess.com')) return;
+
+            window.DocAccess.processedDocIframes.add(iframe);
+
+            try {
+                const cleanedUrl = window.DocAccess.cleanTrackingParams(rawUrl);
+                const normalizedUrl = await window.DocAccess.normalizeUrlWithManifestCheck(cleanedUrl);
+                const hash = await window.DocAccess.generateSHA256(normalizedUrl);
+                const resolvedHash = window.DocAccess.resolveSymlinkHash(hash);
+                const urlStatus = window.DocAccess.getUrlStatus(resolvedHash, false);
+
+                if (urlStatus !== 'enabled') return;
+
+                if (!iframe.parentNode) return;
+
+                const domain = window.DocAccess.primaryDomain || window.DocAccess.currentDomain || '';
+                const viewerUrl = buildDocviewerUrl(normalizedUrl, {
+                    base: resolveScriptRoot(),
+                    urlHash: resolvedHash,
+                    domain: domain
+                });
+
+                iframe.setAttribute('data-docaccess-original-src', iframe.src);
+                iframe.setAttribute('data-docaccess-url', normalizedUrl);
+                iframe.setAttribute('data-docaccess-replaced', 'true');
+                iframe.src = viewerUrl;
+
+            } catch (e) {
+
+            }
+        });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function () {
+            setTimeout(replaceDocumentIframes, 200);
+        });
+    } else {
+        setTimeout(replaceDocumentIframes, 200);
+    }
+
+    if (!window.DocAccess.processedOnclickElements) {
+        window.DocAccess.processedOnclickElements = new WeakSet();
+    }
+
+    function discoverOnclickPdfLinks() {
+
+        if (!window.DocAccess.domainDataLoaded) {
+            return;
+        }
+
+        const urlExtractionPatterns = [
+
+            /window\.open\s*\(\s*["']([^"']*\.pdf[^"']*)["']/gi,
+
+            /location(?:\.href)?\s*=\s*["']([^"']*\.pdf[^"']*)["']/gi,
+
+            /location\.(?:assign|replace)\s*\(\s*["']([^"']*\.pdf[^"']*)["']/gi
+        ];
+
+        const onclickElements = document.querySelectorAll('[onclick*=".pdf" i]');
+
+        onclickElements.forEach(element => {
+
+            if (window.DocAccess.processedOnclickElements.has(element)) {
+                return;
+            }
+
+            if (element.tagName === 'A') {
+                return;
+            }
+
+            const onclickAttr = element.getAttribute('onclick');
+            if (!onclickAttr) return;
+
+            let pdfUrl = null;
+            for (const pattern of urlExtractionPatterns) {
+                pattern.lastIndex = 0;
+                const match = pattern.exec(onclickAttr);
+                if (match && match[1]) {
+                    pdfUrl = match[1];
+                    break;
+                }
+            }
+
+            if (!pdfUrl) return;
+
+            try {
+                const resolvedUrl = new URL(pdfUrl, window.location.href).href;
+                pdfUrl = resolvedUrl;
+            } catch (e) {
+                console.warn('DocAccess: Could not resolve onclick URL:', pdfUrl);
+                return;
+            }
+
+            window.DocAccess.processedOnclickElements.add(element);
+            element.classList.add('docaccess-onclick-activated');
+
+            (async () => {
+                const result = await processDocAccessUrl(element, pdfUrl);
+                if (!result) return;
+                if (!shouldAttachActivatedClickHandler(result.status, result.normalizedUrl)) return;
+
+                element.style.cursor = 'pointer';
+                attachActivatedClickHandler(element, { fallbackUrl: result.normalizedUrl });
+                window.DocAccess.processedLinks.set(element, pdfUrl);
+            })().catch(error => {
+                console.error('DocAccess: Error processing onclick element:', pdfUrl, error);
+            });
+        });
+    }
+
+    if (!window.DocAccess.processedDataDocaccessElements) {
+        window.DocAccess.processedDataDocaccessElements = new WeakMap();
+    }
+
+    function discoverDataDocaccessUrlElements() {
+        if (!window.DocAccess.domainDataLoaded) return;
+
+        const elements = document.querySelectorAll(
+            '[data-docaccess-url]:not(a):not(iframe)'
+        );
+
+        elements.forEach(element => {
+            const inputUrl = element.getAttribute('data-docaccess-url');
+            if (!inputUrl) return;
+
+            const tracker = window.DocAccess.processedDataDocaccessElements;
+            const previousInput = tracker.get(element);
+            if (previousInput === inputUrl) return;
+
+            if (previousInput !== undefined) {
+                element.classList.remove('docaccess-activated');
+                for (let i = element.classList.length - 1; i >= 0; i--) {
+                    const c = element.classList[i];
+                    if (c.indexOf('docaccess-status-') === 0) element.classList.remove(c);
+                }
+                window.DocAccess.activationRegistry.delete(element);
+            }
+
+            let resolvedInputUrl;
+            try {
+                resolvedInputUrl = new URL(inputUrl, window.location.href).href;
+            } catch (e) {
+                console.warn('DocAccess: Could not resolve data-docaccess-url:', inputUrl);
+                return;
+            }
+
+            tracker.set(element, inputUrl);
+
+            element.classList.add('docaccess-activated');
+
+            (async () => {
+                const result = await processDocAccessUrl(element, resolvedInputUrl);
+                if (!result) return;
+                if (!shouldAttachActivatedClickHandler(result.status, result.normalizedUrl)) return;
+
+                element.style.cursor = 'pointer';
+
+                attachActivatedClickHandler(element, { fallbackUrl: result.normalizedUrl });
+            })().catch(error => {
+                console.error(
+                    'DocAccess: Error processing data-docaccess-url element:',
+                    inputUrl, error
+                );
+            });
+        });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function () {
+
+            setTimeout(discoverOnclickPdfLinks, 100);
+            setTimeout(discoverDataDocaccessUrlElements, 100);
+        });
+    } else {
+        setTimeout(discoverOnclickPdfLinks, 100);
+        setTimeout(discoverDataDocaccessUrlElements, 100);
+    }
+
+    setInterval(function () {
+        if (mutationHasOccurred && !window.DocAccess.isBatchProcessing) {
+            mutationHasOccurred = false;
+            initPdfLinks();
+            discoverOnclickPdfLinks();
+            discoverDataDocaccessUrlElements();
+            replaceGoogleDriveIframes();
+            replaceSharePointIframes();
+            wireSharePointFolderLinks();
+            replaceDocumentIframes();
+        }
+        syncOverlayToFrames();
+    }, 500);
+
+    window.DocBox.init = initPdfLinks;
+    window.DocBox.open = openLightbox;
+    window.DocBox.close = function () { closeLightbox(true); };
+
+    window.DocAccess.DocBox = window.DocBox;
+
+    if (window.DocAccess._pendingDocBoxCalls && window.DocAccess._pendingDocBoxCalls.length > 0) {
+        window.DocAccess._pendingDocBoxCalls.forEach(call => {
+            try {
+                window.DocBox[call.fn](...call.args);
+            } catch (e) {
+                console.error('DocBox: Error processing queued call:', call.fn, e);
+            }
+        });
+        window.DocAccess._pendingDocBoxCalls = [];
+    }
+}
+
+window.DocAccess.getDetectedLanguage = function () {
+    window.DocAccess._log('getDetectedLanguage() called');
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlLang = urlParams.get('docaccess-set-lang') || urlParams.get('lang');
+    if (urlLang) {
+        window.DocAccess._log('Language from URL parameter:', urlLang);
+        return urlLang;
+    }
+
+    const cookies = document.cookie.split(';');
+    for (const cookie of cookies) {
+        const [name, value] = cookie.trim().split('=');
+        if (name === 'googtrans' && value) {
+
+            const parts = value.split('/');
+            if (parts.length >= 3 && parts[2]) {
+                window.DocAccess._log('Language from cookie:', parts[2]);
+                return parts[2];
+            }
+        }
+    }
+
+    const hash = window.location.hash;
+    window.DocAccess._log('URL hash:', hash);
+    if (hash.includes('googtrans')) {
+        const match = hash.match(/googtrans\([^|]+\|([^)]+)\)/);
+        if (match) {
+            window.DocAccess._log('Language from URL hash:', match[1]);
+            return match[1];
+        }
+    }
+
+    const isPageTranslated = document.documentElement.classList.contains('translated-ltr') ||
+        document.documentElement.classList.contains('translated-rtl');
+    window.DocAccess._log('isPageTranslated:', isPageTranslated, 'html classes:', document.documentElement.className);
+    if (isPageTranslated) {
+        const googleTranslateCombo = document.querySelector('.goog-te-combo');
+        if (googleTranslateCombo && googleTranslateCombo.value && googleTranslateCombo.value !== 'auto') {
+            window.DocAccess._log('Language from Google Translate dropdown (fallback):', googleTranslateCombo.value);
+            return googleTranslateCombo.value;
+        }
+    }
+
+    window.DocAccess._log('No language detected, returning null');
+    return null;
+};
+
+window.DocAccess.clearGoogTransCookie = function () {
+
+    const paths = ['/', window.location.pathname];
+    const domains = [window.location.hostname, '.' + window.location.hostname];
+
+    for (const path of paths) {
+        for (const domain of domains) {
+            document.cookie = `googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=${path}; domain=${domain}`;
+        }
+
+        document.cookie = `googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=${path}`;
+    }
+    window.DocAccess._log('Cleared googtrans cookie');
+};
+
+(function () {
+    let dropdownWatched = false;
+
+    function watchGoogleTranslateDropdown() {
+        if (dropdownWatched) return;
+
+        const combo = document.querySelector('.goog-te-combo');
+        if (combo) {
+            dropdownWatched = true;
+            combo.addEventListener('change', function () {
+                const selectedLang = combo.value;
+
+                if (!selectedLang || selectedLang.startsWith('en')) {
+                    window.DocAccess.clearGoogTransCookie();
+                }
+            });
+            window.DocAccess._log('Watching Google Translate dropdown for English switch');
+        }
+    }
+
+    watchGoogleTranslateDropdown();
+
+    let attempts = 0;
+    const maxAttempts = 50;
+    const checkInterval = setInterval(function () {
+        attempts++;
+        watchGoogleTranslateDropdown();
+        if (dropdownWatched || attempts >= maxAttempts) {
+            clearInterval(checkInterval);
+        }
+    }, 100);
+})();
+
+window.DocAccess.generateSHA256 = async function (message) {
+
+    if (typeof message === 'string' && message.indexOf('legistar.com') !== -1) {
+        try {
+            const u = new URL(message);
+            if (u.hostname.toLowerCase().endsWith('.legistar.com')) {
+                message = message.replace(/%[0-9a-fA-F]{2}/g, m => m.toUpperCase());
+            }
+        } catch (e) {
+
+        }
+    }
+
+    if (window.DocAccess.sha256Cache.has(message)) {
+        return window.DocAccess.sha256Cache.get(message);
+    }
+
+    const encoder = new TextEncoder();
+    const data = encoder.encode(message);
+
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+
+    const hashHex = hashArray
+        .map(byte => byte.toString(16).padStart(2, '0'))
+        .join('');
+
+    window.DocAccess.sha256Cache.set(message, hashHex);
+
+    return hashHex;
+};
+
+function isInCmsLiveEdit() {
+    try {
+        if (document.getElementById('liveEditToolbar')) {
+            return true;
+        }
+        if (window.self !== window.top && window.top.document.getElementById('liveEditToolbar')) {
+            return true;
+        }
+    } catch (e) {
+    }
+    return false;
+}
+
+function isInWysiwygEditor() {
+
+    if (isInCmsLiveEdit()) {
+        return true;
+    }
+
+    const isAdminUrl = (
+        (window.location.href.includes('/admin/') && window.location.href.includes('edit')) ||
+        window.location.href.includes('wp-admin') ||
+        window.location.href.includes('/wp-admin/') ||
+        window.location.href.includes('node/') && window.location.href.includes('/edit')
+    );
+
+    const searchParams = new URLSearchParams(window.location.search);
+    const isCmsEditUrl = searchParams.get('action') === 'edit' ||
+        searchParams.get('portletAction') === 'edit';
+
+    if (searchParams.get('action') === 'edit' && searchParams.get('portletAction') === 'edit') {
+        return true;
+    }
+
+    if (!isAdminUrl && !isCmsEditUrl) {
+
+        return document.body && (
+            document.body.classList.contains('mce-content-body') ||
+            document.body.classList.contains('cke_editable') ||
+            document.body.getAttribute('contenteditable') === 'true'
+        );
+    }
+
+    const wysiwygIndicators = [
+
+        document.body && (
+            document.body.classList.contains('mce-content-body') ||
+            document.body.classList.contains('cke_editable')
+        ),
+
+        window.tinymce && window.tinymce.activeEditor,
+
+        window.CKEDITOR && Object.keys(window.CKEDITOR.instances || {}).length > 0,
+
+        window.frameElement && window.frameElement.classList.contains('cke_wysiwyg_frame'),
+
+        document.querySelector('[contenteditable="true"].reContentArea') !== null,
+        document.querySelector('[contenteditable="true"].reContentAreaToggle') !== null
+    ];
+
+    return wysiwygIndicators.some(indicator => indicator);
+}
+
+if (!window.DocBox) {
+    if (!window.DocAccess._pendingDocBoxCalls) {
+        window.DocAccess._pendingDocBoxCalls = [];
+    }
+
+    window.DocBox = {
+        init: function (...args) {
+
+            window.DocAccess._pendingDocBoxCalls.push({ fn: 'init', args: args });
+        },
+        open: function (...args) {
+
+            window.DocAccess._pendingDocBoxCalls.push({ fn: 'open', args: args });
+        },
+        close: function (...args) {
+
+            window.DocAccess._pendingDocBoxCalls.push({ fn: 'close', args: args });
+        }
+    };
+
+    window.DocAccess.DocBox = window.DocBox;
+}
+
+if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+
+} else if (window.DocAccess.config && window.DocAccess.config.disabled === true) {
+
+} else if (document.getElementById('docaccess-disable-this-page')) {
+
+    window.DocAccess._log('Disabled via killswitch element (#docaccess-disable-this-page)');
+} else if (window.DocAccess.initialized) {
+
+} else if (isInWysiwygEditor()) {
+
+    window.DocAccess._log('Skipping initialization - running in WYSIWYG editor');
+} else {
+
+    window.DocAccess.initialized = true;
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function () {
+            window.setTimeout(initDocBox, 200);
+        });
+    } else {
+        window.setTimeout(initDocBox, 200);
+    }
+}
+
+async function initDocBox() {
+
+    if (window.DocAccess.currentDomain.endsWith('docaccess.com') || window.DocAccess.currentDomain === 'localhost') {
+        window.DocAccess.onDocAccessDomain = true;
+        window.DocAccess.domainDataLoaded = true;
+        window.DocAccess.initializeDocBox();
+        return;
+    }
+
+    const hostname = window.location.hostname.toLowerCase();
+    const portalMatch = hostname.match(/^([a-z0-9.-]+)\.portal\.civicclerk\.com$/);
+    let isNativePortal = false;
+    let civicClerkTenant = null;
+
+    if (portalMatch) {
+        civicClerkTenant = portalMatch[1];
+        isNativePortal = true;
+
+        window.clerkEmbedProps = window.clerkEmbedProps || {};
+        window.clerkEmbedProps.tenant = civicClerkTenant;
+        window.clerkEmbedProps.isNativePortal = true;
+        window.DocAccess._log('Detected native CivicClerk portal for tenant:', civicClerkTenant);
+    }
+
+    try {
+        const domainToFetch = window.DocAccess.currentDomain;
+        const domainJsonUrl = `${window.DocAccess.scriptOrigin}/domains/${domainToFetch}/domain.json`;
+
+        const _mdb = (() => {
+            let dbp;
+            const open = () => dbp || (dbp = new Promise(r => {
+                try {
+                    const req = indexedDB.open('da', 1);
+                    req.onupgradeneeded = (e) => e.target.result.createObjectStore('m');
+                    req.onsuccess = (e) => r(e.target.result);
+                    req.onerror = () => r(null);
+                } catch (e) { r(null); }
+            }));
+            const canGz = typeof CompressionStream !== 'undefined';
+            return {
+                async get(k) {
+                    const db = await open();
+                    if (!db) return null;
+                    return new Promise(r => {
+                        try {
+                            const req = db.transaction('m', 'readonly').objectStore('m').get(k);
+                            req.onsuccess = async () => {
+                                const entry = req.result;
+                                if (!entry) return r(null);
+                                try {
+                                    if (entry.z) {
+                                        const ds = new Blob([entry.z]).stream().pipeThrough(new DecompressionStream('gzip'));
+                                        r(JSON.parse(await new Response(ds).text()));
+                                    } else {
+                                        r(entry.d);
+                                    }
+                                } catch (e) { r(null); }
+                            };
+                            req.onerror = () => r(null);
+                        } catch (e) { r(null); }
+                    });
+                },
+                async set(k, v) {
+                    const db = await open();
+                    if (!db) return;
+                    try {
+                        const st = db.transaction('m', 'readwrite').objectStore('m');
+                        if (canGz) {
+                            const cs = new Blob([JSON.stringify(v)]).stream().pipeThrough(new CompressionStream('gzip'));
+                            st.put({ z: await new Response(cs).arrayBuffer() }, k);
+                        } else {
+                            st.put({ d: v }, k);
+                        }
+                    } catch (e) { }
+                },
+                async del(k) {
+                    const db = await open();
+                    if (!db) return;
+                    try { db.transaction('m', 'readwrite').objectStore('m').delete(k); } catch (e) { }
+                }
+            };
+        })();
+
+        let data;
+        const response = await fetch(domainJsonUrl).catch(() => null);
+
+        if (response && response.status === 403) {
+            _mdb.del(domainToFetch);
+            if (isNativePortal) {
+                window.DocAccess._log('Native CivicClerk portal not registered - features disabled');
+                return;
+            }
+            if (window.DocAccess.overlayScriptActive === true) {
+                alert(`Domain ${window.DocAccess.currentDomain} not added to DocAccess`);
+            }
+            throw new Error('Access Denied');
+        }
+
+        if (response && response.ok) {
+            data = await response.json();
+            _mdb.set(domainToFetch, data);
+        } else {
+            data = await _mdb.get(domainToFetch);
+            if (!data) throw new Error(response ? `HTTP error! status: ${response.status}` : 'Network error');
+        }
+
+        if (data.compromised) {
+            window.DocAccess._log('Domain is marked as compromised - disabled');
+            return;
+        }
+
+        if (data.deactivated) {
+            window.DocAccess._log('Domain is deactivated - disabled');
+            return;
+        }
+
+        if (data.domain) {
+            window.DocAccess.primaryDomain = data.domain;
+            window.DocAccess.domainAliases = data.aliases || [];
+
+            const domainExcludedPaths = data.excluded_paths || [];
+            window.DocAccess.excludedPaths = [...window.DocAccess.defaultExcludedPaths, ...domainExcludedPaths];
+            window.DocAccess.includedPaths = data.included_paths || [];
+            window.DocAccess.restrictToFoundOn = data.restrict_to_found_on || [];
+            window.DocAccess.foundOnExcludes = data.found_on_excludes || [];
+
+            if (data.sb707) {
+                window.DocAccess.sb707Config = data.sb707;
+            }
+
+            if (data.civicclerk_tenant) {
+                window.DocAccess.civicclerkTenant = data.civicclerk_tenant;
+            }
+
+            if (data.default_transcript_view) {
+                window.DocAccess.defaultTranscriptView = true;
+            }
+
+            if (data.open_in_new_tab) {
+                window.DocAccess.openInNewTab = true;
+            }
+
+            if (data.translation_enabled === false) {
+                window.DocAccess.translationEnabled = false;
+            }
+
+            if (data.version_check_disabled === true) {
+                window.DocAccess.versionCheckDisabled = true;
+            }
+
+            if (data.skip_path_rewrite_normalization === true) {
+                window.DocAccess.skipPathRewriteNormalization = true;
+            }
+
+            if (Array.isArray(data.featured_languages) && data.featured_languages.length > 0) {
+                window.DocAccess.featuredLanguages = data.featured_languages;
+            }
+
+            if (Array.isArray(data.scripts)) {
+                data.scripts.forEach(function (s) {
+                    if (s && s.src) {
+                        var el = document.createElement('script');
+                        el.src = window.DocAccess.scriptOrigin + '/docbox-' + s.src + '.js';
+                        el.async = true;
+                        document.head.appendChild(el);
+                    }
+                });
+            }
+
+            const { domain, aliases, excluded_paths, included_paths, restrict_to_found_on, found_on_excludes, sb707, civicclerk_tenant, docbox_enabled, link_processing_disabled, default_transcript_view, open_in_new_tab, translation_enabled, version_check_disabled, docbox_installed, featured_languages, scripts, ...urlHashes } = data;
+            window.DocAccess.domainDocumentLinkData = urlHashes;
+
+            if (link_processing_disabled === true) {
+                window.DocAccess.linkProcessingDisabled = true;
+                if (window.DocAccess.overlayScriptActive !== true) {
+                    window.DocAccess._log('Link processing is disabled for this customer (hard shutdown)');
+                    return;
+                }
+                window.DocAccess._log('Link processing is disabled, but overlay mode is active (demo)');
+            }
+
+            if (docbox_enabled === false && window.DocAccess.overlayScriptActive !== true) {
+                window.DocAccess.viewerDisabled = true;
+                window.DocAccess._log('Viewer is paused for this customer (still processing links)');
+            } else if (docbox_enabled === false) {
+                window.DocAccess._log('Viewer is paused, but overlay mode is active (demo)');
+            }
+        } else {
+
+            window.DocAccess.domainDocumentLinkData = data;
+
+            window.DocAccess.excludedPaths = [...window.DocAccess.defaultExcludedPaths];
+            window.DocAccess.includedPaths = [];
+            window.DocAccess.restrictToFoundOn = [];
+            window.DocAccess.foundOnExcludes = [];
+        }
+
+        window.DocAccess.domainDataLoaded = true;
+
+        if (window.DocAccess.overlayScriptActive !== true && window.DocAccess.isPageExcluded()) {
+            window.DocAccess._log('Page outside configured activation scope - disabled');
+            return;
+        }
+
+        if (isNativePortal && civicClerkTenant && typeof window.DocAccess.loadCivicClerkIntegration === 'function') {
+            window.DocAccess._log('Native CivicClerk portal registered, enabling features');
+            window.DocAccess.loadCivicClerkIntegration();
+        }
+
+        if (window.DocAccess.sb707Config && window.DocAccess.sb707Config.enabled) {
+            loadSB707Block();
+        }
+
+        if (!window.DocAccess.initializeDocBoxCalled) {
+
+            window.DocAccess.initializeDocBox();
+        } else {
+
+            const reprocessLinks = () => {
+                if (!window.DocAccess.isBatchProcessing) {
+                    window.DocBox.init();
+                } else {
+
+                    setTimeout(reprocessLinks, 100);
+                }
+            };
+            reprocessLinks();
+        }
+
+    } catch (error) {
+
+        window.DocAccess._log("Domain not registered with DocAccess.", error.message);
+    }
+}
+
+function loadSB707Block() {
+
+    const path = window.location.pathname;
+    if (path !== '/' && path !== '' && path !== '/index.html' && path !== '/index.php') {
+        return;
+    }
+
+    const script = document.createElement('script');
+
+    let scriptSrc = '';
+    const currentScript = document.currentScript || (function () {
+        const scripts = document.getElementsByTagName('script');
+        for (let i = 0; i < scripts.length; i++) {
+            if (scripts[i].src && scripts[i].src.match(/docbox\.js(\?.*)?$/)) {
+                return scripts[i];
+            }
+        }
+        return null;
+    })();
+
+    if (currentScript && currentScript.src) {
+        const url = new URL(currentScript.src);
+        scriptSrc = url.origin + '/docbox-sb707.js';
+    } else {
+
+        scriptSrc = 'https://docaccess.com/docbox-sb707.js';
+    }
+
+    script.src = scriptSrc;
+    script.async = true;
+    script.onload = function () {
+        window.DocAccess._log('SB707 Public Meetings block script loaded');
+
+        if (window.DocAccess.SB707Block && window.DocAccess.sb707Config) {
+            window.DocAccess.SB707Block.init(window.DocAccess.sb707Config);
+        }
+    };
+    script.onerror = function () {
+        console.error('DocAccess: Failed to load SB707 Public Meetings block');
+    };
+
+    document.head.appendChild(script);
+}
